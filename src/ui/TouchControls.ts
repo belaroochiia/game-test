@@ -58,6 +58,12 @@ export interface AbsorbSource {
   readonly absorbProgress: number;
 }
 
+/** What TouchControls needs from Shrines; wired by the bootstrap (Phase 5). */
+export interface ShrineSource {
+  readonly nearbyShrine: { state: string } | null;
+  beginChallenge(): boolean;
+}
+
 const DASH_COOLDOWN = 1.2;
 
 /** Max simultaneous pointers we track. Pre-allocated: no allocation per touch. */
@@ -126,8 +132,9 @@ export class TouchControls implements System {
   /** Phase 4 wiring; null until the bootstrap sets them. */
   skillsRef: SkillButtonSource | null = null;
   orbsRef: AbsorbSource | null = null;
+  shrinesRef: ShrineSource | null = null;
   private absorbing = false;
-  private attackIconState = 0; // 0 attack, 1 absorb
+  private attackIconState = 0; // 0 attack, 1 absorb, 2 shrine
 
   private readonly onPointerDownStick: (event: PointerEvent) => void;
   private readonly onPointerDownLook: (event: PointerEvent) => void;
@@ -321,17 +328,21 @@ export class TouchControls implements System {
     }
     this.stickWasActive = active;
 
-    // Attack button doubles as ABSORB near a soul orb (§8.2; §6 has no spare
-    // button). The icon flips and the sweep shows hold progress instead.
+    // The attack button is the game's one contextual action (§6 has no spare
+    // button): ABSORB near a soul orb (§8.2), START near an idle shrine
+    // (§8.2.2), attack otherwise. Orb wins ties — it is the rarer moment.
     const orbs = this.orbsRef;
+    const shrines = this.shrinesRef;
     const nearOrb = orbs !== null && orbs.nearbyOrb;
-    const wantIcon = nearOrb ? 1 : 0;
+    const shrineInfo = shrines !== null ? shrines.nearbyShrine : null;
+    const nearIdleShrine = !nearOrb && shrineInfo !== null && shrineInfo.state === 'idle';
+    const wantIcon = nearOrb ? 1 : nearIdleShrine ? 2 : 0;
     if (wantIcon !== this.attackIconState) {
       this.attackIconState = wantIcon;
       const attackView = this.buttons[SKILL_SLOTS];
       if (attackView !== undefined) {
         const icon = attackView.el.querySelector('.tc__btn-icon');
-        if (icon !== null) icon.textContent = nearOrb ? '✋' : '⚔';
+        if (icon !== null) icon.textContent = nearOrb ? '✋' : nearIdleShrine ? '⚑' : '⚔';
       }
       if (!nearOrb && this.absorbing) {
         this.absorbing = false;
@@ -476,6 +487,16 @@ export class TouchControls implements System {
         orbs.setAbsorbing(true);
         this.buzz();
         return;
+      }
+      const shrines = this.shrinesRef;
+      const shrineInfo = shrines !== null ? shrines.nearbyShrine : null;
+      if (shrineInfo !== null && shrineInfo.state === 'idle') {
+        // Tap starts the challenge (§8.2.2); no hold — commitment should be a
+        // decision, not an endurance test on top of the fight that follows.
+        if (shrines !== null && shrines.beginChallenge()) {
+          this.buzz();
+          return;
+        }
       }
       this.input.attackQueuedAt = now;
       this.buzz();
