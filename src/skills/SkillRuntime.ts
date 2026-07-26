@@ -8,7 +8,6 @@ import type { System } from '../core/Engine';
 import type { EventBus } from '../core/EventBus';
 import { ObjectPool } from '../core/ObjectPool';
 import { EnemyBase } from '../enemy/EnemyBase';
-import { ArchetypeEnemy } from '../enemy/ArchetypeEnemy';
 import { PLAYER_STATE } from '../player/PlayerController';
 import type { PlayerController } from '../player/PlayerController';
 import type { PlayerStats } from '../player/PlayerStats';
@@ -690,10 +689,13 @@ export class SkillRuntime implements System {
     let armor = target instanceof EnemyBase ? target.def.armor : 0;
     if (armor > 0 && status.armorBroken(target)) armor *= 0.5;
     // §9's elementMultiplier goes live in Phase 5: resonance × the target's
-    // resist/weak table from enemies.json (×0.5 / ×1.5 / 1).
+    // resist/weak table (×0.5 / ×1.5 / 1). Structural, not instanceof: the
+    // archetype enemies and Boss Vael both expose the lookup, and a future
+    // elemental target only needs the method, not a base class.
     let elementMult = shot.elementMult;
-    if (target instanceof ArchetypeEnemy) {
-      elementMult *= target.elementMultiplierFor(shot.element);
+    const elemental = target as Partial<{ elementMultiplierFor(e: ElementId): number }>;
+    if (typeof elemental.elementMultiplierFor === 'function') {
+      elementMult *= elemental.elementMultiplierFor(shot.element);
     }
     const tp = target.position;
     this.damage.deal(

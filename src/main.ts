@@ -43,8 +43,13 @@ import { DamageSystem, setSeed as setDamageSeed } from './combat/DamageSystem';
 import { TargetLock } from './combat/TargetLock';
 import enemiesJson from './data/enemies.json';
 import { EnemyBase } from './enemy/EnemyBase';
+import { ArchetypeEnemy } from './enemy/ArchetypeEnemy';
 import { EnemyDefs } from './enemy/EnemyDefs';
 import { EnemyManager } from './enemy/EnemyManager';
+import { SpawnDirector } from './enemy/SpawnDirector';
+import { BossVael } from './enemy/BossVael';
+import { Shrines } from './world/Shrines';
+import { Fragments } from './world/Fragments';
 import { DamageNumbers } from './ui/DamageNumbers';
 
 import { KeyboardInput } from './input/KeyboardInput';
@@ -54,15 +59,15 @@ import { HUD } from './ui/HUD';
 import './styles/game-ui.css';
 
 /**
- * Phase 3 bootstrap (CLAUDE.md §12): combat. The streamed world of Phase 2 plus
- * the melee combo, hitstop, damage numbers, a slime camp with readable
- * telegraphs, soft target lock, and death/respawn on both sides.
+ * Phase 5 bootstrap (CLAUDE.md §12): the filled world — five regions, twelve
+ * enemy kinds under a SpawnDirector, six elemental shrines, nine Grimoire
+ * Fragment sites, and Archmage Vael at the Hollow Spire.
  *
- * Not here yet, on purpose: skills (Phase 4), the full bestiary and spawn
- * budgets (Phase 5), progression and save (Phase 6).
+ * Not here yet, on purpose: XP->levels, gear, quests, save (Phase 6); audio,
+ * the remaining bosses, the full 60-skill catalogue (Phase 7).
  */
 
-const VERSION = '0.5.0-phase4';
+const VERSION = '0.6.0-phase5';
 
 const WORLD_SEED = 1337;
 
@@ -238,6 +243,132 @@ class SkillCastSystem implements System {
   }
 }
 
+/**
+ * Boss HP bar and shrine-challenge status, one tiny DOM strip. House rules:
+ * DOM built once, Text nodes, transform-scaled fill, writes only on change.
+ */
+class EncounterHudSystem implements System {
+  readonly name = 'encounterHud';
+  private readonly boss: BossVael;
+  private readonly shrines: Shrines;
+  private readonly root: HTMLDivElement;
+  private readonly bossWrap: HTMLDivElement;
+  private readonly bossFill: HTMLDivElement;
+  private readonly bossText: Text;
+  private readonly challengeText: Text;
+  private readonly challengeWrap: HTMLDivElement;
+  private bossShown = false;
+  private challengeShown = false;
+  private lastFill = -1;
+  private lastLabel = '';
+  private lastChallenge = '';
+  private acc = 0;
+
+  constructor(mount: HTMLElement, boss: BossVael, shrines: Shrines) {
+    this.boss = boss;
+    this.shrines = shrines;
+
+    if (document.getElementById('encounter-style') === null) {
+      const style = document.createElement('style');
+      style.id = 'encounter-style';
+      style.textContent =
+        '.enc{position:absolute;top:calc(var(--ad-safe-t) + 64px);left:50%;transform:translateX(-50%);' +
+        'display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;z-index:35}' +
+        '.enc__boss{display:none;width:min(420px,64vw)}' +
+        '.enc__boss.is-on{display:block}' +
+        '.enc__label{font-size:10px;letter-spacing:.14em;color:var(--ad-ink);text-align:center;' +
+        'text-shadow:0 1px 2px rgba(0,0,0,.9)}' +
+        '.enc__track{height:10px;border:1px solid rgba(255,107,107,.6);background:rgba(6,9,15,.72);' +
+        'overflow:hidden;transform:skewX(-12deg)}' +
+        '.enc__fill{height:100%;transform-origin:0 50%;background:linear-gradient(180deg,#c14be0,#7a2ba8)}' +
+        '.enc__challenge{display:none;padding:3px 10px;border:1px solid var(--ad-panel-line);' +
+        'background:rgba(6,9,15,.72);color:var(--ad-accent);font-size:11px;letter-spacing:.08em}' +
+        '.enc__challenge.is-on{display:block}';
+      document.head.appendChild(style);
+    }
+
+    this.root = document.createElement('div');
+    this.root.className = 'enc';
+    this.bossWrap = document.createElement('div');
+    this.bossWrap.className = 'enc__boss';
+    const label = document.createElement('div');
+    label.className = 'enc__label';
+    this.bossText = document.createTextNode('');
+    label.appendChild(this.bossText);
+    const track = document.createElement('div');
+    track.className = 'enc__track';
+    this.bossFill = document.createElement('div');
+    this.bossFill.className = 'enc__fill';
+    track.appendChild(this.bossFill);
+    this.bossWrap.appendChild(label);
+    this.bossWrap.appendChild(track);
+    this.challengeWrap = document.createElement('div');
+    this.challengeWrap.className = 'enc__challenge';
+    this.challengeText = document.createTextNode('');
+    this.challengeWrap.appendChild(this.challengeText);
+    this.root.appendChild(this.bossWrap);
+    this.root.appendChild(this.challengeWrap);
+    mount.appendChild(this.root);
+  }
+
+  update(dt: number): void {
+    this.acc += dt;
+    if (this.acc < 0.1) return;
+    this.acc = 0;
+
+    const boss = this.boss;
+    const bossOn = boss.fightActive;
+    if (bossOn !== this.bossShown) {
+      this.bossShown = bossOn;
+      this.bossWrap.classList.toggle('is-on', bossOn);
+    }
+    if (bossOn) {
+      const fraction = boss.def.maxHp > 0 ? boss.hp / boss.def.maxHp : 0;
+      const step = Math.round(fraction * 256) / 256;
+      if (step !== this.lastFill) {
+        this.lastFill = step;
+        this.bossFill.style.transform = 'scaleX(' + step + ')';
+      }
+      const label =
+        'ARCHMAGE VAEL — P' + boss.phase + (boss.shieldLayers > 0 ? ' ◈' + boss.shieldLayers : '');
+      if (label !== this.lastLabel) {
+        this.lastLabel = label;
+        this.bossText.nodeValue = label;
+      }
+    }
+
+    const status = this.shrines.challengeStatus();
+    const challengeOn = status !== null;
+    if (challengeOn !== this.challengeShown) {
+      this.challengeShown = challengeOn;
+      this.challengeWrap.classList.toggle('is-on', challengeOn);
+    }
+    if (status !== null) {
+      const text =
+        status.kind.toUpperCase() +
+        ' · ' +
+        Math.ceil(status.remaining) +
+        's · ' +
+        Math.round(status.progress * 100) +
+        '%';
+      if (text !== this.lastChallenge) {
+        this.lastChallenge = text;
+        this.challengeText.nodeValue = text;
+      }
+    }
+  }
+
+  reset(): void {
+    this.lastFill = -1;
+    this.lastLabel = '';
+    this.lastChallenge = '';
+  }
+
+  dispose(): void {
+    this.root.remove();
+  }
+}
+
 /** Feeds §6.6's lock into the player's auto-aim each tick. */
 class AimLinkSystem implements System {
   readonly name = 'aimLink';
@@ -335,6 +466,16 @@ interface ArcanumDebug {
   grimoireScreen(): { open: boolean };
   openGrimoire(): void;
   closeGrimoire(): void;
+  regionAt(x: number, z: number): number;
+  director(): { budgetUsed: number; regionBudget: number; active: number; spawned: number };
+  shrines(): { element: string; x: number; z: number; state: string; kind: string }[];
+  fragments(): { sites: { skillId: string; piece: number; x: number; z: number; taken: boolean }[]; counts: Record<string, number> };
+  boss(): { active: boolean; hp: number; maxHp: number; phase: number; shield: number } | null;
+  warpBoss(): void;
+  spawnKind(kind: string, x: number, z: number): boolean;
+  shrineTimeScale(n: number): void;
+  pauseDirector(on: boolean): void;
+  freezeEnemy(enemyId: number, seconds: number): boolean;
   version: string;
 }
 
@@ -614,6 +755,49 @@ function main(): void {
     return undefined;
   };
 
+  // --- Phase 5: population, shrines, fragments, the boss -------------------
+  const director = new SpawnDirector({
+    defs: enemyDefs,
+    manager: enemies,
+    biomes,
+    player,
+    field,
+    cameraYawRef: { getYaw: () => cameraRig.yaw },
+  });
+  const shrines = new Shrines({
+    scene: engine.scene,
+    field,
+    biomes,
+    player,
+    grimoire,
+    registry,
+    bus: engine.bus,
+    defs: enemyDefs,
+    manager: enemies,
+  });
+  const fragments = new Fragments({
+    scene: engine.scene,
+    field,
+    biomes,
+    player,
+    grimoire,
+    registry,
+  });
+  const boss = new BossVael({
+    scene: engine.scene,
+    field,
+    player,
+    hitbox,
+    damage,
+    projectiles: enemies.sharedProjectiles(),
+    bus: engine.bus,
+    grimoire,
+    registry,
+    freeze: enemies.freezeRef,
+  });
+  enemies.spawnBoss(boss);
+  status.register(boss);
+
   // Damage fan-out: numbers always; trauma and haptics scale with weight, and
   // getting hit shakes harder than dealing (§7's trauma-based shake). DoT ticks
   // are silent: numbers show, but no trauma, no haptics (§8.5).
@@ -634,15 +818,20 @@ function main(): void {
       cameraRig.addTrauma(event.packet.heavy ? 0.28 : 0.1);
       if (canBuzz) navigator.vibrate(10); // §6.7
     }
-    // §8.2.1: a kill may leave a soul orb. Status boards follow the corpse.
+    // §8.2.1: a kill may leave a soul orb, at the DEF's drop chance now that
+    // enemies carry one (the boss's Legendary is scripted, not an orb).
     if (event.killed && event.target !== playerCombatant) {
-      orbs.maybeDrop(
-        event.target.position.x,
-        event.target.position.y + 0.6,
-        event.target.position.z,
-        0.5,
-        event.target.id,
-      );
+      const dropChance =
+        event.target instanceof ArchetypeEnemy ? event.target.skillDropChance : 0;
+      if (dropChance > 0) {
+        orbs.maybeDrop(
+          event.target.position.x,
+          event.target.position.y + 0.6,
+          event.target.position.z,
+          dropChance,
+          event.target.id,
+        );
+      }
     }
   });
 
@@ -675,6 +864,7 @@ function main(): void {
 
   touch.skillsRef = runtime;
   touch.orbsRef = orbs;
+  touch.shrinesRef = shrines;
 
   touch.setSensitivity(0.005);
   cameraRig.setSensitivity(touch.sensitivity);
@@ -692,6 +882,9 @@ function main(): void {
   engine.addSystem(stats);
   engine.addSystem(player);
   engine.addSystem(enemies);
+  engine.addSystem(director);
+  engine.addSystem(shrines);
+  engine.addSystem(fragments);
   engine.addSystem(hitbox);
   engine.addSystem(damage);
   engine.addSystem(status);
@@ -709,6 +902,7 @@ function main(): void {
   engine.addSystem(new WorldLinkSystem(player, water, chunks, sky));
   engine.addSystem(damageNumbers);
   engine.addSystem(notifications);
+  engine.addSystem(new EncounterHudSystem(uiRoot, boss, shrines));
   engine.addSystem(hud);
 
   // --- debug overlay toggle ------------------------------------------------
@@ -1000,6 +1194,63 @@ function main(): void {
     },
     closeGrimoire: () => {
       grimoireScreen.close();
+    },
+
+    regionAt: (x: number, z: number) => {
+      biomes.sample(x, z, biomeScratch);
+      return biomeScratch.dominant;
+    },
+    director: () => ({
+      budgetUsed: director.activeBudgetUsed,
+      regionBudget: director.regionBudget,
+      active: enemies.aliveCount,
+      spawned: director.spawnedCount,
+    }),
+    shrines: () => {
+      const list: { element: string; x: number; z: number; state: string; kind: string }[] = [];
+      for (let i = 0; i < shrines.count; i++) {
+        const info = shrines.shrineInfo(i);
+        if (info !== null) {
+          list.push({ element: info.element, x: info.x, z: info.z, state: info.state, kind: info.kind });
+        }
+      }
+      return list;
+    },
+    fragments: () => {
+      const sites: { skillId: string; piece: number; x: number; z: number; taken: boolean }[] = [];
+      const counts: Record<string, number> = {};
+      for (let i = 0; i < fragments.siteCount; i++) {
+        const info = fragments.siteInfo(i);
+        if (info === null) continue;
+        sites.push(info);
+        counts[info.skillId] = grimoire.fragmentCount(info.skillId);
+      }
+      return { sites, counts };
+    },
+    boss: () =>
+      boss.fightActive || boss.hp < boss.def.maxHp
+        ? { active: boss.fightActive, hp: boss.hp, maxHp: boss.def.maxHp, phase: boss.phase, shield: boss.shieldLayers }
+        : null,
+    warpBoss: () => {
+      debug.warp(0, 233);
+    },
+    spawnKind: (kind: string, x: number, z: number) => {
+      const def = enemyDefs.get(kind);
+      if (def === undefined) return false;
+      return enemies.spawnDef(def, x, z, false) !== null;
+    },
+    shrineTimeScale: (n: number) => {
+      shrines.timeScale = n > 0 ? n : 1;
+    },
+    pauseDirector: (on: boolean) => {
+      director.paused = on;
+    },
+    freezeEnemy: (enemyId: number, seconds: number) => {
+      // Through the real status system (STATUS.Freeze = 1), so gated behaviour
+      // (no movement, held telegraph) is exactly what gameplay produces.
+      const enemy = findEnemyById(enemyId);
+      if (enemy === undefined || !enemy.alive) return false;
+      return status.apply(enemy, 1 as StatusId, 1, seconds, 1, 1);
     },
 
     version: VERSION,

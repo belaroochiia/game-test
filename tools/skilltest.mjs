@@ -520,6 +520,7 @@ const CAST_AT = (o) => {
     let phase = 0;
     let phaseT = t0;
     let castT = -1;
+    let freezeT = -Infinity;
     const frontX = o.ax + o.fx * o.frontDist;
     const frontZ = o.az + o.fz * o.frontDist;
     const backX = o.ax - o.fx * o.flankDist;
@@ -580,6 +581,17 @@ const CAST_AT = (o) => {
             out.flankId = f.id;
             out.flankStart = f.hp;
           }
+          // Opt-in (freezeTargets): hold both dummies through the real
+          // StatusEffects system so a long cast (void_collapse 0.7 s) cannot
+          // lose the race to a slime lunge cancelling it. Callers only set it
+          // where the freeze cannot contaminate the measurement (no earth =
+          // Shatter ×3, no fire = Thermal Shock, no freeze-status skills =
+          // statusSeen would read OUR freeze instead of the skill's own).
+          if (o.freezeTargets) {
+            if (out.targetId >= 0) d.freezeEnemy(out.targetId, 6);
+            if (out.flankId >= 0) d.freezeEnemy(out.flankId, 6);
+            freezeT = now;
+          }
           d.learnSkill(o.skillId);
           d.equipSkill(0, o.skillId);
           phase = 2;
@@ -594,6 +606,13 @@ const CAST_AT = (o) => {
           phaseT = now;
         }
       } else if (phase === 3) {
+        // Mana waits (phase 2) and cooldown retries can outlast the 6 s
+        // freeze — re-arm it so the cast window is always covered.
+        if (o.freezeTargets && now - freezeT > 2000) {
+          if (out.targetId >= 0) d.freezeEnemy(out.targetId, 6);
+          if (out.flankId >= 0) d.freezeEnemy(out.flankId, 6);
+          freezeT = now;
+        }
         const ok = d.castSlot(0);
         if (ok) {
           out.accepted = true;
@@ -1566,10 +1585,19 @@ async function main() {
       const windowMs = Math.ceil((skill.castTime + (delivery.type === 'nova' ? delivery.expandSeconds ?? 0 : 1.0) + 2.0) * 1000);
       // A retried cast must be able to wait out its own earlier cast's cooldown.
       const acceptMs = Math.min(15_000, 3500 + Math.ceil(skill.cooldown * 1000));
+      // Long casts lose the race to a slime lunge cancelling them. Freeze the
+      // dummies — but only where the freeze can't distort the measurement:
+      // earth would Shatter (×3), fire would Thermal Shock, and a skill whose
+      // own status is freeze would see OURS in statusSeen.
+      const freezeTargets =
+        skill.castTime >= 0.45 &&
+        skill.element !== 'earth' &&
+        skill.element !== 'fire' &&
+        (skill.status === undefined || skill.status.id !== 'freeze');
       return page
         .evaluate(CAST_AT, {
           ax: a.x, az: a.z, fx: F.x, fz: F.z,
-          frontDist, flankDist,
+          frontDist, flankDist, freezeTargets,
           skillId: skill.id,
           manaCost: skill.manaCost,
           statusIdNum: skill.status !== undefined ? STATUS_INDEX[skill.status.id] ?? -1 : -1,

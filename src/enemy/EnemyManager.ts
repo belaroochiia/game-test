@@ -140,16 +140,19 @@ export class EnemyManager implements System {
    * disposed, compacted out of the array. Spawning past the cap without this
    * exhausted HitboxSystem's fixed slots — corpses held them forever.
    */
-  purgeDead(): number {
+  purgeDead(force = false): number {
     const enemies = this.enemies;
     let write = 0;
     let purged = 0;
     for (let i = 0; i < enemies.length; i++) {
       const enemy = enemies[i];
       if (enemy === undefined) continue;
-      // The scripted boss is never reclaimed (see bossExempt) — its corpse
-      // outlives the kill so the HUD bar and a later reset() still reach it.
-      if (!enemy.alive && enemy !== this.bossExempt) {
+      // Only corpses with no future are reclaimed. Non-expendable dead (Phase 3
+      // home-respawners, the scripted boss) keep their slots — purging them
+      // silently cancelled pending 12 s respawns once the live director started
+      // triggering purges on its spawn cadence. `force` (killAll's test-reset
+      // path) overrides that and reclaims every corpse except the boss.
+      if (!enemy.alive && (force || enemy.expendable) && enemy !== this.bossExempt) {
         this.hitbox.unregister(enemy);
         if (this.boardsRef !== null) this.boardsRef.unregister(enemy);
         this.scene.remove(enemy.root);
@@ -400,6 +403,11 @@ export class EnemyManager implements System {
       killPacket.hitZ = enemy.position.z;
       enemy.takeDamage(killPacket);
     }
+    // Test-reset semantics: the registry must come back empty (bar the boss).
+    // Debug ring dummies are non-expendable (they own a 12 s self-respawn), so
+    // the ordinary purge would leak their corpses until §9's 18 cap starves
+    // every later spawn — force-reclaim them here instead.
+    this.purgeDead(true);
   }
 
   /**

@@ -81,7 +81,14 @@ const STUTTER_WARMUP_FRAMES = 12;
  * (4 props + 1 water + 1 sky + 7 blocky avatar parts). This is the assertion
  * that actually polices that decision, independently of the 110 total.
  */
-const DRAW_OVERHEAD_MAX = 20;
+/*
+ * 45, up from Phase 2's 20: the Phase 5 world legitimately carries
+ * position-varying non-terrain content — six distance-culled shrines (3 draws
+ * each), nine fragment sites, torches, the dormant boss and its pillar ring.
+ * The check still catches the failure it exists for (per-chunk prop meshes
+ * would blow far past this), and total draws stay gated at 110 elsewhere.
+ */
+const DRAW_OVERHEAD_MAX = 45;
 
 /**
  * Steepest biome-weight change per world unit. §5 asks for a ~30 u transition
@@ -997,7 +1004,7 @@ async function main() {
     if (worstOverhead <= DRAW_OVERHEAD_MAX) {
       pass(
         'non-terrain draw calls stay constant (props/water/sky are not per-chunk)',
-        `peak ${worstOverhead} draw calls beyond the visible chunks (<= ${DRAW_OVERHEAD_MAX}); expected ~13 = 4 props + water + sky + 7 avatar parts`,
+        `peak ${worstOverhead} draw calls beyond the visible chunks (<= ${DRAW_OVERHEAD_MAX}); expected ~13-40: props+water+sky+avatar plus distance-culled shrines/fragment sites (Phase 5) parts`,
       );
     } else {
       fail(
@@ -1322,11 +1329,15 @@ async function main() {
 
     // A wandering enemy in frame varies the non-terrain draw count between
     // keyframe snapshots and fails the dome-constancy check spuriously (found
-    // via GL-level draw capture). The check is about the DOME; clear the cast.
+    // via GL-level draw capture). The check is about the DOME; clear the cast,
+    // stop the director repopulating mid-snapshot, and let death animations,
+    // orb drops and other kill transients finish before sampling.
     await page.evaluate(() => {
       const d = globalThis.__ARCANUM_DEBUG__;
+      if (typeof d.pauseDirector === 'function') d.pauseDirector(true);
       if (typeof d.killAllEnemies === 'function') d.killAllEnemies();
     });
+    await sleep(1600);
 
     const dayRows = [];
     let bandsWorked = true;

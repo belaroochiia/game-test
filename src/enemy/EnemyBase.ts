@@ -160,6 +160,15 @@ export abstract class EnemyBase implements Combatant, System {
   }
 
   /** Time served — the manager still requires the player > 25 u away. */
+  /**
+   * True when a corpse has no future — purgeDead may reclaim its slots.
+   * Phase 3 enemies self-respawn at home, so their corpses are NOT expendable;
+   * director-managed enemies never respawn and are.
+   */
+  get expendable(): boolean {
+    return false;
+  }
+
   get readyToRespawn(): boolean {
     return !this.aliveFlag && this.deadElapsed >= this.def.respawnSeconds;
   }

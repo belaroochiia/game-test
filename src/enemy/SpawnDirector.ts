@@ -126,6 +126,9 @@ function rand(): number {
 }
 
 export class SpawnDirector implements System {
+  /** Debug/world-gate switch: a paused director does nothing at all — no spawns, no reclaims. */
+  paused = false;
+
   readonly name = 'spawnDirector';
 
   /** Camera blind-side hint; null falls back to full-circle placement. */
@@ -223,6 +226,7 @@ export class SpawnDirector implements System {
   }
 
   update(dt: number): void {
+    if (this.paused) return;
     // Accumulated, not per-frame (contract): between cadences this method is
     // one add and one compare — nothing else runs at tick rate.
     this.cadence += dt;

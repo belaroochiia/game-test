@@ -197,6 +197,10 @@ export class ArchetypeEnemy extends EnemyBase {
   }
 
   /** Director-managed enemies never self-respawn; the director owns population. */
+  override get expendable(): boolean {
+    return this.directorManaged;
+  }
+
   override get readyToRespawn(): boolean {
     return this.directorManaged ? false : super.readyToRespawn;
   }
