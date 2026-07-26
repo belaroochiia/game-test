@@ -632,6 +632,178 @@ async function main() {
       );
     }
 
+    // --- 12. REAL touch drives the player --------------------------------
+    /*
+     * This exists because the synthetic-event check below it did not catch a
+     * shipped bug: `dispatchEvent` bypasses hit-testing, and asserting on CSS
+     * classes proved the stick lit up without proving the player moved. Here the
+     * browser does its own hit-test via CDP, and the thumb is HELD STILL after
+     * the drag — which fires no further pointer events and is the normal way a
+     * player holds a direction.
+     */
+    const cdp = await page.context().newCDPSession(page);
+    const zoneRect = await page.evaluate(() => {
+      const zone = document.querySelector('.tc__stick-zone');
+      if (zone === null) return null;
+      const r = zone.getBoundingClientRect();
+      return { x: r.left + r.width * 0.5, y: r.top + r.height * 0.7 };
+    });
+    if (zoneRect === null) {
+      fail('real touch walks the player', '.tc__stick-zone not found');
+    } else {
+      const touch = async (type, x, y) =>
+        cdp.send('Input.dispatchTouchEvent', {
+          type,
+          touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }],
+        });
+
+      await page.evaluate(() => {
+        globalThis.__ARCANUM_DEBUG__.clearInput();
+        globalThis.__ARCANUM_DEBUG__.warp(0, 0);
+      });
+      await touch('touchStart', zoneRect.x, zoneRect.y);
+      // One move to full deflection, then nothing — a held thumb is silent.
+      await touch('touchMove', zoneRect.x, zoneRect.y - 60);
+      await sleep(1200);
+      const touchWalk = await page.evaluate(() => {
+        const p = globalThis.__ARCANUM_DEBUG__.player();
+        const stick = document.getElementById('tc-stick');
+        return {
+          speed: p.speed,
+          state: p.state,
+          distance: Math.sqrt(p.x * p.x + p.z * p.z),
+          stickActive: stick !== null && stick.classList.contains('is-active'),
+        };
+      });
+      await touch('touchEnd', zoneRect.x, zoneRect.y - 60);
+      await sleep(200);
+      const afterRelease = await page.evaluate(() => globalThis.__ARCANUM_DEBUG__.player());
+
+      report.measurements.realTouchSpeed = touchWalk.speed;
+      report.measurements.realTouchDistance = touchWalk.distance;
+
+      if (touchWalk.speed > 3 && touchWalk.distance > 2) {
+        pass(
+          'real touch walks the player',
+          `held thumb -> ${touchWalk.speed.toFixed(2)} u/s, moved ${touchWalk.distance.toFixed(2)} u`,
+        );
+      } else {
+        fail(
+          'real touch walks the player',
+          `stickActive=${touchWalk.stickActive} but speed ${touchWalk.speed.toFixed(2)} u/s and distance ${touchWalk.distance.toFixed(2)} u — the stick lights up without moving the player`,
+        );
+      }
+
+      // Releasing must stop the player, not leave it walking forever.
+      if (afterRelease.speed < 1.5) {
+        pass('releasing the stick stops the player', `${afterRelease.speed.toFixed(2)} u/s after release`);
+      } else {
+        fail('releasing the stick stops the player', `still ${afterRelease.speed.toFixed(2)} u/s`);
+      }
+    }
+
+    // --- 13. real touch fires the action buttons -------------------------
+    const buttonProbe = await page.evaluate(() => {
+      const pick = (selector) => {
+        const el = document.querySelector(selector);
+        if (el === null) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      };
+      return { dash: pick('.tc__btn--dash'), attack: pick('.tc__btn--attack'), skill: pick('.tc__btn--skill') };
+    });
+    if (buttonProbe.dash === null || buttonProbe.attack === null || buttonProbe.skill === null) {
+      fail('real touch fires the action buttons', 'button DOM not found');
+    } else {
+      const tap = async (point) => {
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchStart',
+          touchPoints: [{ x: point.x, y: point.y, id: 2 }],
+        });
+        await sleep(60);
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      };
+
+      await page.evaluate(() => {
+        globalThis.__ARCANUM_DEBUG__.clearInput();
+        globalThis.__ARCANUM_DEBUG__.warp(0, 0);
+      });
+      await sleep(120);
+
+      // Dash: sample while it is happening, not after it has ended.
+      await tap(buttonProbe.dash);
+      const dashByTouch = await page.evaluate(async () => {
+        const debug = globalThis.__ARCANUM_DEBUG__;
+        let peakSpeed = 0;
+        let sawDash = false;
+        const started = performance.now();
+        await new Promise((resolve) => {
+          const tick = () => {
+            const p = debug.player();
+            if (p.speed > peakSpeed) peakSpeed = p.speed;
+            if (p.state === 'Dash') sawDash = true;
+            if (performance.now() - started > 400) resolve();
+            else requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        });
+        return { peakSpeed, sawDash, cooldown: debug.player().dashCooldownLeft };
+      });
+      report.measurements.dashByTouchPeak = dashByTouch.peakSpeed;
+      if (dashByTouch.sawDash && dashByTouch.peakSpeed > DASH_MIN_PEAK) {
+        pass('dash button responds to real touch', `peak ${dashByTouch.peakSpeed.toFixed(2)} u/s, state reached Dash`);
+      } else {
+        fail(
+          'dash button responds to real touch',
+          `sawDash=${dashByTouch.sawDash} peak ${dashByTouch.peakSpeed.toFixed(2)} u/s cooldown ${dashByTouch.cooldown.toFixed(2)}`,
+        );
+      }
+
+      // Attack: a 0.3 s Attack1 stub until Phase 3, but the state must change.
+      await sleep(500);
+      await tap(buttonProbe.attack);
+      const attackByTouch = await page.evaluate(async () => {
+        const debug = globalThis.__ARCANUM_DEBUG__;
+        let sawAttack = false;
+        const started = performance.now();
+        await new Promise((resolve) => {
+          const tick = () => {
+            if (debug.player().state === 'Attack1') sawAttack = true;
+            if (performance.now() - started > 300) resolve();
+            else requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        });
+        return sawAttack;
+      });
+      if (attackByTouch) pass('attack button responds to real touch', 'state reached Attack1');
+      else fail('attack button responds to real touch', 'state never reached Attack1');
+
+      // Skill: spends mana and starts its cooldown sweep.
+      await sleep(400);
+      const manaBefore = await page.evaluate(() => {
+        const el = document.querySelector('.tc__btn--skill');
+        return { cooldownClass: el.classList.contains('is-cooldown') };
+      });
+      await tap(buttonProbe.skill);
+      await sleep(200);
+      const skillAfter = await page.evaluate(() => {
+        const el = document.querySelector('.tc__btn--skill');
+        return {
+          cooldownClass: el.classList.contains('is-cooldown'),
+          cd: getComputedStyle(el).getPropertyValue('--cd').trim(),
+        };
+      });
+      if (!manaBefore.cooldownClass && skillAfter.cooldownClass) {
+        pass('skill button responds to real touch', `entered cooldown, --cd=${skillAfter.cd}`);
+      } else {
+        fail(
+          'skill button responds to real touch',
+          `cooldown class before=${manaBefore.cooldownClass} after=${skillAfter.cooldownClass}`,
+        );
+      }
+    }
+
     // --- 1. errors --------------------------------------------------------
     if (report.pageErrors.length === 0) pass('no uncaught page errors', '0');
     else fail('no uncaught page errors', report.pageErrors.join(' | '));

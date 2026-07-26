@@ -196,9 +196,10 @@ export class TouchControls implements System {
       const slot = this.findSlotById(event.pointerId);
       if (slot === null) return;
       if (slot.role === ROLE_STICK) {
+        // Only record the position. The axes are derived in update(), because a
+        // thumb held still fires no further events — see the note there.
         slot.lastX = event.clientX;
         slot.lastY = event.clientY;
-        this.updateStickVisual(slot);
       } else if (slot.role === ROLE_LOOK) {
         // Raw pixels; CameraRig applies sensitivity so one setting covers both.
         this.input.lookDX += event.clientX - slot.lastX;
@@ -256,12 +257,28 @@ export class TouchControls implements System {
   }
 
   update(dt: number): void {
-    // Only touch the axes while the stick is live, so keyboard input on desktop
-    // is not clobbered every tick; the release edge zeroes them exactly once.
+    /*
+     * The stick axes are derived HERE, once per tick, and not in the pointermove
+     * handler. Two reasons, and the first one is a bug that shipped:
+     *
+     * 1. A thumb resting at full deflection fires no further pointer events. If
+     *    the axes are only written on move, any producer that runs later in the
+     *    tick order (KeyboardInput zeroes them every tick) wins, and the player
+     *    never walks. Holding the stick is the normal case, not the edge case.
+     * 2. Input belongs to the fixed tick anyway — pointer events arrive at
+     *    whatever rate the digitiser feels like, up to several per frame.
+     *
+     * Only written while the stick is live, so desktop keyboard input is left
+     * alone; the release edge zeroes the axes exactly once.
+     */
     const active = this.stickPointer !== -1;
-    if (!active && this.stickWasActive) {
+    if (active) {
+      const slot = this.findSlotById(this.stickPointer);
+      if (slot !== null) this.sampleStick(slot);
+    } else if (this.stickWasActive) {
       this.input.moveX = 0;
       this.input.moveY = 0;
+      this.knob.style.transform = 'translate(-50%,-50%)';
     }
     this.stickWasActive = active;
 
@@ -434,7 +451,8 @@ export class TouchControls implements System {
     }
   }
 
-  private updateStickVisual(slot: PointerSlot): void {
+  /** Derives the axes and the knob offset from the live pointer position. */
+  private sampleStick(slot: PointerSlot): void {
     let dx = slot.lastX - slot.originX;
     let dy = slot.lastY - slot.originY;
     const distance = Math.sqrt(dx * dx + dy * dy);
