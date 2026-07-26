@@ -27,10 +27,36 @@ const DEAD_ZONE_PX = 8;
 const MAX_RADIUS_PX = 55;
 
 const SKILL_SLOTS = 4;
+/** Pre-runtime fallback icons; replaced by element glyphs once skillsRef is wired. */
 const SKILL_ICONS = ['⚡', '❄', '🔥', '🌀'];
-/** Placeholder costs and cooldowns until SkillRegistry lands in Phase 4. */
+/** Generic per-ELEMENT glyphs — data-driven safe, §4.1: no skill ids in code. */
+const ELEMENT_ICONS: Record<string, string> = {
+  fire: '🔥',
+  ice: '❄',
+  wind: '🌀',
+  earth: '🪨',
+  water: '💧',
+  light: '✨',
+  dark: '⚡',
+};
+/** Placeholder costs/cooldowns, used only until the bootstrap wires skillsRef. */
 const SKILL_PLACEHOLDER_COST = [14, 18, 22, 20];
 const SKILL_PLACEHOLDER_COOLDOWN = [1.5, 3, 4.5, 6];
+
+/** What TouchControls needs from SkillRuntime; wired by the bootstrap (Phase 4). */
+export interface SkillButtonSource {
+  cooldownFraction(slot: number): number;
+  cooldownSeconds(slot: number): number;
+  manaCost(slot: number): number;
+  skillAt(slot: number): { element: string } | null;
+}
+
+/** What TouchControls needs from SoulOrbs; wired by the bootstrap (Phase 4). */
+export interface AbsorbSource {
+  readonly nearbyOrb: boolean;
+  setAbsorbing(active: boolean): void;
+  readonly absorbProgress: number;
+}
 
 const DASH_COOLDOWN = 1.2;
 
@@ -96,6 +122,12 @@ export class TouchControls implements System {
 
   private sensitivityValue = 0.005;
   private invertYValue = false;
+
+  /** Phase 4 wiring; null until the bootstrap sets them. */
+  skillsRef: SkillButtonSource | null = null;
+  orbsRef: AbsorbSource | null = null;
+  private absorbing = false;
+  private attackIconState = 0; // 0 attack, 1 absorb
 
   private readonly onPointerDownStick: (event: PointerEvent) => void;
   private readonly onPointerDownLook: (event: PointerEvent) => void;
@@ -217,7 +249,14 @@ export class TouchControls implements System {
         this.stick.classList.remove('is-active');
       } else if (slot.role === ROLE_BUTTON) {
         const view = this.buttons[slot.button];
-        if (view !== undefined) view.pressedBy = -1;
+        if (view !== undefined) {
+          view.pressedBy = -1;
+          if (view.slot === -1 && this.absorbing) {
+            this.absorbing = false;
+            const orbs = this.orbsRef;
+            if (orbs !== null) orbs.setAbsorbing(false);
+          }
+        }
       }
       slot.id = -1;
       slot.role = ROLE_FREE;
@@ -282,6 +321,25 @@ export class TouchControls implements System {
     }
     this.stickWasActive = active;
 
+    // Attack button doubles as ABSORB near a soul orb (§8.2; §6 has no spare
+    // button). The icon flips and the sweep shows hold progress instead.
+    const orbs = this.orbsRef;
+    const nearOrb = orbs !== null && orbs.nearbyOrb;
+    const wantIcon = nearOrb ? 1 : 0;
+    if (wantIcon !== this.attackIconState) {
+      this.attackIconState = wantIcon;
+      const attackView = this.buttons[SKILL_SLOTS];
+      if (attackView !== undefined) {
+        const icon = attackView.el.querySelector('.tc__btn-icon');
+        if (icon !== null) icon.textContent = nearOrb ? '✋' : '⚔';
+      }
+      if (!nearOrb && this.absorbing) {
+        this.absorbing = false;
+        if (orbs !== null) orbs.setAbsorbing(false);
+      }
+    }
+
+    const skills = this.skillsRef;
     const dashLeft = this.player.dashCooldownLeft;
     for (let i = 0; i < this.buttons.length; i++) {
       const view = this.buttons[i];
@@ -290,6 +348,18 @@ export class TouchControls implements System {
       if (view.slot === -2) {
         view.cooldownLeft = dashLeft > 0 ? dashLeft : 0;
         view.cooldownTotal = DASH_COOLDOWN;
+      } else if (view.slot >= 0 && skills !== null) {
+        // Real numbers from the runtime (Phase 4): fraction drives the sweep,
+        // seconds drive the countdown text.
+        view.cooldownTotal = 1;
+        view.cooldownLeft = skills.cooldownFraction(view.slot);
+        const def = skills.skillAt(view.slot);
+        const glyph = def !== null ? (ELEMENT_ICONS[def.element] ?? '?') : '·';
+        if (view.el.dataset['icon'] !== glyph) {
+          view.el.dataset['icon'] = glyph;
+          const icon = view.el.querySelector('.tc__btn-icon');
+          if (icon !== null) icon.textContent = glyph;
+        }
       } else if (view.cooldownLeft > 0) {
         view.cooldownLeft -= dt;
         if (view.cooldownLeft < 0) view.cooldownLeft = 0;
@@ -399,7 +469,23 @@ export class TouchControls implements System {
       return;
     }
     if (view.slot === -1) {
+      const orbs = this.orbsRef;
+      if (orbs !== null && orbs.nearbyOrb) {
+        // Hold-to-absorb (§8.2's 1.2 s). Release is handled in onPointerEnd.
+        this.absorbing = true;
+        orbs.setAbsorbing(true);
+        this.buzz();
+        return;
+      }
       this.input.attackQueuedAt = now;
+      this.buzz();
+      return;
+    }
+
+    if (this.skillsRef !== null) {
+      // Runtime path (Phase 4): queue the press; the cast adapter consumes it
+      // and the runtime is the single authority on cost/cooldown/refusal.
+      this.input.skillQueuedAt[view.slot] = now;
       this.buzz();
       return;
     }
@@ -409,7 +495,6 @@ export class TouchControls implements System {
     if (this.stats.mana < cost) return;
 
     this.input.skillQueuedAt[view.slot] = now;
-    // Phase 4 replaces the placeholder cost/cooldown with the skill's own data.
     this.stats.spendMana(cost);
     view.cooldownLeft = view.cooldownTotal;
     if (this.onSkill !== undefined) this.onSkill(view.slot);
@@ -426,8 +511,11 @@ export class TouchControls implements System {
     let state = STATE_IDLE;
     if (view.pressedBy !== -1) state = STATE_PRESSED;
     else if (view.cooldownLeft > 0) state = STATE_COOLDOWN;
-    else if (view.slot >= 0 && this.stats.mana < (SKILL_PLACEHOLDER_COST[view.slot] ?? 0)) {
-      state = STATE_NOMANA;
+    else if (view.slot >= 0) {
+      const cost = this.skillsRef !== null
+        ? this.skillsRef.manaCost(view.slot)
+        : (SKILL_PLACEHOLDER_COST[view.slot] ?? 0);
+      if (cost > 0 && this.stats.mana < cost) state = STATE_NOMANA;
     }
 
     if (state !== view.visualState) {

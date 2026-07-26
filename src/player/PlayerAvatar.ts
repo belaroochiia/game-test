@@ -238,6 +238,19 @@ export class BlockyAvatar implements Avatar {
       return;
     }
 
+    if (state.state === PLAYER_STATE.Cast || state.state === PLAYER_STATE.CastChannel) {
+      // Both arms forward, palms out — the universal "channeling magic" pose,
+      // held with a small tremble so it reads as effort rather than a T-pose.
+      const tremble = Math.sin(this.clock * 26) * 0.04;
+      this.armLeft.rotation.x = -1.35 + tremble;
+      this.armRight.rotation.x = -1.35 - tremble;
+      this.torso.rotation.x = 0.08;
+      this.legLeft.rotation.x = 0.14;
+      this.legRight.rotation.x = -0.14;
+      this.body.position.y = 0;
+      return;
+    }
+
     if (state.state === PLAYER_STATE.Hit) {
       // Recoil: torso thrown back, arms up. Held for the stagger's 0.25 s.
       this.torso.rotation.x = -0.32;

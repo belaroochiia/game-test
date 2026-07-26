@@ -152,6 +152,9 @@ export class PlayerController implements System {
 
   /** 0 = not attacking, 1..3 = current swing. */
   private comboStageValue = 0;
+  /** Cast timer (Phase 4). While > 0 the player is in Cast state. */
+  private castTimer = 0;
+  private castCanMove = false;
   private attackTimer = 0;
   private struckThisSwing = false;
   private hitTimer = 0;
@@ -276,6 +279,9 @@ export class PlayerController implements System {
       wishZ = -inX * sin + inZ * cos;
     }
 
+    // --- cast lock (Phase 4) -------------------------------------------------
+    if (this.castTimer > 0) this.castTimer -= dt;
+
     // --- attack combo (§9) ---------------------------------------------------
     const attacking = this.comboStageValue > 0;
     if (attacking) this.stepAttack(dt, now);
@@ -305,7 +311,7 @@ export class PlayerController implements System {
     }
 
     // --- horizontal velocity ------------------------------------------------
-    if (this.comboStageValue > 0) {
+    if (this.comboStageValue > 0 || (this.castTimer > 0 && !this.castCanMove)) {
       // Rooted during a swing: velocity bleeds off fast, no steering. Facing may
       // still snap to the lock (handled in startAttack), which is §6.6's auto-aim.
       const decay = 1 - Math.exp(-14 * dt);
@@ -372,6 +378,8 @@ export class PlayerController implements System {
     this.attackTimer = 0;
     this.comboStageValue = 0;
     this.struckThisSwing = false;
+    this.castTimer = 0;
+    this.castCanMove = false;
     this.hitTimer = 0;
     this.iframeTimer = 0;
     this.downTimer = 0;
@@ -570,6 +578,10 @@ export class PlayerController implements System {
       return;
     }
 
+    if (this.castTimer > 0) {
+      this.currentState = PLAYER_STATE.Cast;
+      return;
+    }
     if (this.comboStageValue === 1) {
       this.currentState = PLAYER_STATE.Attack1;
       return;
@@ -663,6 +675,30 @@ export class PlayerController implements System {
     if (this.attackTimer >= total) this.cancelAttack();
   }
 
+  /**
+   * Enters the Cast state for `seconds` (Phase 4, §8.1's castTime). Refused
+   * while dashing, staggered, down, or mid-swing — SkillRuntime checks first,
+   * this is the belt to its braces. canMove=false roots the player like a swing.
+   */
+  beginCast(seconds: number, canMove: boolean): boolean {
+    if (
+      this.currentState === PLAYER_STATE.Dash ||
+      this.currentState === PLAYER_STATE.Hit ||
+      this.currentState === PLAYER_STATE.Down ||
+      this.comboStageValue > 0
+    ) {
+      return false;
+    }
+    this.castTimer = seconds;
+    this.castCanMove = canMove;
+    if (!Number.isNaN(this.aimYaw)) this.facing = this.aimYaw;
+    return true;
+  }
+
+  get casting(): boolean {
+    return this.castTimer > 0;
+  }
+
   // --- damage intake (Combatant, wired by the bootstrap) --------------------
 
   /** True while dash i-frames or post-hit i-frames are live. */
@@ -689,6 +725,7 @@ export class PlayerController implements System {
     this.stats.damage(amount);
     this.iframeTimer = HIT_IFRAME_SECONDS;
     this.cancelAttack();
+    this.castTimer = 0;
     if (this.stats.hp <= 0) {
       this.currentState = PLAYER_STATE.Down;
       this.downTimer = DOWN_SECONDS;
