@@ -1,6 +1,6 @@
 {
   "name": "arcanum-drift",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Arcanum Drift — mini open-world 3D, medieval magic, mobile-first WebGL",
@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "smoke": "node tools/smoke.mjs",
     "playtest": "node tools/playtest.mjs",
-    "worldtest": "node tools/worldtest.mjs"
+    "worldtest": "node tools/worldtest.mjs",
+    "combattest": "node tools/combattest.mjs"
   },
   "dependencies": {
     "three": "^0.185.1"

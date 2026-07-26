@@ -7,8 +7,8 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 2 — The world feels alive. Complete and device-verified.**
-> Phases 3–7 are not started. Do not add features from a later phase before the
+> **Status: Phase 3 — Core combat. Complete, pending device test.**
+> Phases 4–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
 ## Stack
@@ -136,6 +136,43 @@ tools/
 4. Lock the screen and unlock it, or switch tabs and come back: the loop pauses
    while hidden and resumes without fast-forwarding (the cube must not jump).
 5. Rotate the device: the canvas re-fits with no stretching and no black bars.
+
+## Measured — Phase 3 (headless gate)
+
+`npm run combattest` spawns slimes, fights them with scripted and real-touch
+input, dies, respawns, and replays seeded damage sequences. **43/43 checks
+pass.** The §12 criterion — "hitting a slime feels satisfying without VFX" — is
+a feel judgement no headless gate can make; what the gate proves is the numbers
+the feel is built from.
+
+| Measured | Value | Required |
+|---|---|---|
+| Combo stages reached | 1 → 2 → 3 | all three |
+| Hitstop | 5–6 ticks, enemy frozen 0.0000 u | ≤ 7 ticks, world unfrozen |
+| World during hitstop | dayPhase + frames advance | not gated |
+| Telegraph warning | **0.80 s**, zero damage during wind-up | ≥ 0.5 s, honest |
+| Dash through a strike | unharmed | i-frames win |
+| Hit spacing on the player | ≥ 0.84 s over 29 hits | ≥ 0.55 s (i-frames) |
+| Player death → respawn | Down 1.68 s → spawn at 260/260 | full reset |
+| Enemy respawn | t+12.1 s when far; stays dead when camped | 12 s, > 25 u only |
+| Seeded damage series | [24.8, 15.2] twice, identical | deterministic |
+| Draw calls / triangles | 44 / 50 300 | ≤ 110 / ≤ 150 000 |
+| Heap drift in a brawl | **0 B/frame** | < 2 KB/frame |
+
+Notes from the phase:
+
+- **Hitstop counts in ticks, not milliseconds.** §9 asks for 60–90 ms; at a
+  fixed 60 Hz the choices are 4 ticks (67 ms) or 6 (100 ms). Light hits take 4,
+  heavies 6 — erring long reads better than erring short.
+- **The telegraph is enforced, not aspirational**: the gate asserts no contact
+  damage lands while `telegraphing` is true, and measured 0.80 s of continuous
+  warning before the first hit.
+- **Two measurement bugs masqueraded as regressions** when live slimes joined
+  the world: enemies chasing the player through §7's movement measurements
+  truncated a dash into a Hit state (the movement gate now neutralises enemies
+  per section), and span timing under-read on slow pages until the press was
+  deferred past the first sample so both edges of a state span are bracketed.
+  The isolated tick trace shows the dash at exactly 0.18 s throughout.
 
 ## Measured — Phase 2 (headless gate)
 

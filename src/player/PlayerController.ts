@@ -675,7 +675,9 @@ export class PlayerController implements System {
   }
 
   get iframesLeft(): number {
-    return this.iframeTimer;
+    // The timer decrements past zero by up to one dt before the guard skips it;
+    // clamp so debug consumers never see a phantom negative.
+    return this.iframeTimer > 0 ? this.iframeTimer : 0;
   }
 
   /**
