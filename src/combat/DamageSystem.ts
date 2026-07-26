@@ -8,9 +8,6 @@ const CRIT_CHANCE = 0.08;
 const CRIT_MULT = 1.6;
 /** §9: armor halves damage at 300 and diminishes past it. */
 const ARMOR_SOFTCAP = 300;
-/** Phase 4 fills these from skill element + status reactions (§8.5). */
-const ELEMENT_MULT = 1;
-const REACTION_MULT = 1;
 /**
  * §9 asks for 60-90 ms; on the 60 Hz fixed step that is 4 ticks (~67 ms) for
  * light hits and 6 ticks (100 ms) for heavy — the closest the step can get to
@@ -47,6 +44,9 @@ export interface DamageEvent {
   /** Post-mitigation amount actually dealt (≤ packet.amount on overkill). */
   applied: number;
   killed: boolean;
+  /** True for status DoT ticks (§8.5): hitstop was skipped, and trauma/haptic
+   * listeners should skip too. Numbers listeners ignore it — ticks still show. */
+  silent: boolean;
 }
 
 export interface DamageSystemOptions {
@@ -111,6 +111,12 @@ export class DamageSystem implements System {
    * base + scaling exactly". Hitstop and listener fan-out fire only when damage
    * actually applies: an i-framed no-sell must not freeze the game or spawn a
    * number. Returns the applied amount.
+   *
+   * elementMult / reactionMult are §8.5's multipliers; the defaults keep every
+   * Phase 3 call site valid unchanged. silent=true is for status DoT ticks
+   * (§8.5): damage, numbers and kill flow stay uniform, but a twice-a-second
+   * tick must not freeze the fight — it skips ONLY the hitstop trigger.
+   * Listeners still run and can read event.silent to skip trauma/haptics.
    */
   deal(
     target: Combatant,
@@ -124,6 +130,9 @@ export class DamageSystem implements System {
     hitX: number,
     hitY: number,
     hitZ: number,
+    elementMult = 1,
+    reactionMult = 1,
+    silent = false,
   ): number {
     if (!target.alive) return 0;
     if (this.dealing) {
@@ -136,7 +145,7 @@ export class DamageSystem implements System {
       // One roll per attempted hit keeps the seeded sequence replay-stable.
       const crit = rand() < CRIT_CHANCE;
       const mitigation = 1 - armor / (armor + ARMOR_SOFTCAP);
-      let final = (base + statScaling) * ELEMENT_MULT * mitigation * REACTION_MULT;
+      let final = (base + statScaling) * elementMult * mitigation * reactionMult;
       if (crit) final *= CRIT_MULT;
 
       const packet = this.packet;
@@ -153,17 +162,18 @@ export class DamageSystem implements System {
       const applied = target.takeDamage(packet);
       if (applied <= 0) return 0;
 
-      this.hitstop.trigger(heavy ? HEAVY_HITSTOP_TICKS : LIGHT_HITSTOP_TICKS);
+      if (!silent) this.hitstop.trigger(heavy ? HEAVY_HITSTOP_TICKS : LIGHT_HITSTOP_TICKS);
 
       let event = this.event;
       if (event === undefined) {
         // The one allocation this system ever makes after boot.
-        event = { packet, target, applied, killed: !target.alive };
+        event = { packet, target, applied, killed: !target.alive, silent };
         this.event = event;
       } else {
         event.target = target;
         event.applied = applied;
         event.killed = !target.alive;
+        event.silent = silent;
       }
 
       const listeners = this.listeners;

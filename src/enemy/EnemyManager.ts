@@ -33,6 +33,11 @@ export interface EnemyManagerOptions {
   hitstop: Hitstop;
 }
 
+/** Phase 4: what the manager needs from StatusEffects. Wired by the bootstrap. */
+export interface FreezeSource {
+  isFrozen(c: { readonly id: number }): boolean;
+}
+
 /** §9's cheap AI stagger: past this distance, brains step every 6th tick. */
 const BRAIN_NEAR_DIST = 30;
 const BRAIN_TICK_STRIDE = 6;
@@ -76,6 +81,9 @@ const killPacket: DamagePacket = {
 
 export class EnemyManager implements System {
   readonly name = 'enemies';
+
+  /** Phase 4 wiring; null until the bootstrap sets it. */
+  freezeRef: FreezeSource | null = null;
 
   /** Stable array — TargetLock iterates it; never reallocated per frame. */
   readonly enemies: EnemyBase[] = [];
@@ -199,7 +207,13 @@ export class EnemyManager implements System {
           scratchCtx.self = enemy;
           scratchCtx.distToPlayer = dist;
           scratchCtx.dt = enemy.consumeBrainDt();
-          enemy.brain.step(scratchCtx, enemy.desiredMove);
+          // §8.5 Freeze: a frozen enemy neither thinks nor moves. The brain's
+          // timers also hold, so freeze cannot be used to skip a telegraph.
+          if (this.freezeRef !== null && this.freezeRef.isFrozen(enemy)) {
+            enemy.desiredMove.set(0, 0);
+          } else {
+            enemy.brain.step(scratchCtx, enemy.desiredMove);
+          }
           if (enemy.brain.consumeStrike()) enemy.beginStrike();
         }
       }
