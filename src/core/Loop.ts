@@ -1,7 +1,20 @@
 import type { EventBus } from './EventBus';
 
-/** Logic runs at a fixed rate so simulation is deterministic and frame-rate independent (§4.2). */
-export const FIXED_HZ = 30;
+/**
+ * Logic runs at a fixed rate so simulation is deterministic and frame-rate independent (§4.2).
+ *
+ * 60 Hz, not §4.2's 30 Hz — a deliberate, approved deviation. At 30 Hz one tick is 33 ms,
+ * which is 22 % of §7's 0.15 s dash i-frame and 28 % of its 0.12 s input buffer, so the
+ * precise controls §7 is chasing get quantised away; §9's 60-90 ms hitstop collapses to
+ * 2-3 indistinguishable ticks; and a 14 u/s dash advances 0.47 u per tick against a
+ * 0.4-radius capsule, i.e. straight through thin props. Logic cost is not the constraint
+ * here (0.2 ms measured for the whole frame on device) — §3's budget is a GPU budget.
+ *
+ * From Phase 5, stagger the expensive-but-slow systems onto even ticks (AI, status
+ * effects, spawn director), which §9 asks for anyway. Movement, collision, camera and
+ * hitboxes stay every tick — those are what the extra rate buys.
+ */
+export const FIXED_HZ = 60;
 export const FIXED_DT = 1 / FIXED_HZ;
 
 const DEFAULT_MAX_SUB_STEPS = 5;

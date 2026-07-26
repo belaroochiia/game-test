@@ -57,6 +57,9 @@ const BUDGET = {
 /** Heap growth over the sample window above which we print a GC-pressure smell. */
 const HEAP_SMELL_MB = 1.5;
 
+/** Mirrors FIXED_HZ in src/core/Loop.ts — a reference value for the table, not an assertion. */
+const FIXED_HZ = 60;
+
 /** ProfilerMetrics keys the contract guarantees. */
 const METRIC_KEYS = [
   'fps', 'frameMs', 'frameMsMax', 'cpuMs', 'drawCalls', 'triangles', 'programs',
@@ -674,7 +677,7 @@ function assertSamples() {
     );
   }
 
-  // Fixed-timestep logic actually ticks (Phase 0 acceptance, §4.2 30 Hz).
+  // Fixed-timestep logic actually ticks (Phase 0 acceptance; rate is FIXED_HZ).
   const firstTicks = samples[0].tickCount;
   const lastTicks = samples[samples.length - 1].tickCount;
   if (firstTicks < 0 || lastTicks < 0) {
@@ -795,7 +798,7 @@ function printMetricTable() {
     ['pixelRatio', (s) => s.metrics.pixelRatio, 2, `<= ${BUDGET.pixelRatio}`],
     ['drawWidth', (s) => s.metrics.drawWidth, 0, ''],
     ['drawHeight', (s) => s.metrics.drawHeight, 0, ''],
-    ['ticks/s', (s) => s.metrics.ticks, 0, '~30'],
+    ['ticks/s', (s) => s.metrics.ticks, 0, `~${FIXED_HZ}`],
     ['frameCount', (s) => s.frameCount, 0, 'increasing'],
     ['tickCount', (s) => s.tickCount, 0, 'increasing'],
     ['elapsed s', (s) => s.elapsed, 2, ''],

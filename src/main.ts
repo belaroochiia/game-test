@@ -20,10 +20,10 @@ const VERSION = '0.1.0-phase0';
 // ---------------------------------------------------------------------------
 
 /**
- * The one thing on screen. Logic runs at the fixed 30 Hz tick and only writes
- * plain numbers; the visual transform is written in render() using the loop's
- * interpolation alpha, so the cube looks smooth at any display refresh rate
- * without the simulation ever running faster than 30 Hz (§4.2).
+ * The one thing on screen. Logic runs at the fixed tick and only writes plain
+ * numbers; the visual transform is written in render() using the loop's
+ * interpolation alpha, so the cube looks smooth on a 120 Hz panel without the
+ * simulation ever running faster than FIXED_HZ (§4.2).
  */
 class SpinRigSystem implements System {
   readonly name = 'spinRig';

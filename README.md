@@ -48,7 +48,7 @@ src/
   main.ts                  bootstrap, WebGL2 guard, debug hook, the spinning cube
   core/
     Engine.ts              renderer + scene + camera + system list + frame wiring
-    Loop.ts                fixed 30 Hz logic accumulator, uncapped interpolated render
+    Loop.ts                fixed 60 Hz logic accumulator, uncapped interpolated render
     DynamicResolution.ts   adaptive pixel-ratio ladder driven by smoothed frame time
     Profiler.ts            FPS / frame / CPU / draws / tris / heap DOM overlay
     EventBus.ts            typed, allocation-free, re-entrancy safe pub-sub
@@ -59,10 +59,11 @@ tools/smoke.mjs            headless verification harness
 
 ### Engine conventions worth knowing before Phase 1
 
-- **Fixed timestep 30 Hz.** `System.update(dt)` is always called with
-  `dt = 1/30`; visual smoothing belongs in the optional `System.render(alpha)`,
-  where `alpha` is the interpolation factor between the last two ticks. Never
-  move anything by "per frame" amounts (§4.2).
+- **Fixed timestep 60 Hz** (`FIXED_HZ` in `core/Loop.ts` — see the decision
+  below). `System.update(dt)` is always called with `dt = 1/60`; visual
+  smoothing belongs in the optional `System.render(alpha)`, where `alpha` is the
+  interpolation factor between the last two ticks. Never move anything by "per
+  frame" amounts (§4.2).
 - **Systems, not singletons.** `engine.addSystem({ name, update, reset })`.
   `Engine` is the only global-ish object (§4.4). Adding or removing a system
   during a tick is deferred to the end of that tick, so it is safe.
@@ -111,7 +112,7 @@ over LAN:
 | Texture memory | 0 MB | ≤ 48 MB |
 | JS heap | **16 MB** | ≤ 280 MB |
 | Drawing buffer | 576×984 @1.50 | pixel ratio ≤ 1.5 |
-| Fixed tick rate | **30 /s** | 30 Hz |
+| Fixed tick rate | **30 /s** | 30 Hz (see below) |
 | Bundle | 137 kB gzip | ≤ 8 MB |
 
 Phase 0's acceptance criterion is met. Two honest caveats:
@@ -124,6 +125,11 @@ Phase 0's acceptance criterion is met. Two honest caveats:
 - Dynamic resolution scaling never engaged here because nothing was ever slow
   enough. It was verified separately under software rendering, where frame time
   rose to 87 ms and the ladder stepped 1.50 → 1.25 on its own.
+
+This run was captured **before** the tick rate moved to 60 Hz, so `TICK` reads
+`30 /s` above. Everything else is unaffected — the tick rate touches CPU, and
+CPU was 0.2 ms of a 8.3 ms frame. Re-measure at the end of Phase 1, when there
+is finally something worth measuring.
 
 ### Caveat on `npm run smoke`
 
@@ -153,12 +159,12 @@ whether the frame budget in §3 is met.
   `render()` allocates internally, so the absolute figure is unreachable; the
   smoke test therefore reports heap *drift*, which is the number that matters.
 
-## Open decision before Phase 1
+## Decided: 60 Hz fixed tick (deviates from §4.2)
 
-**Fixed tick rate: 30 Hz (as specified) or 60 Hz?** Phase 0 ships §4.2's 30 Hz
-because the doc mandates it, and `Loop` takes `fixedDt` as an option so it is a
-one-line change in `Engine`. But 30 Hz has concrete costs for the mechanics the
-doc itself specifies:
+`FIXED_HZ = 60` in `core/Loop.ts`. This is an approved deviation from §4.2's
+30 Hz, taken before Phase 1 so `PlayerController` could be written against the
+final tick length. 30 Hz has concrete costs for the mechanics the doc itself
+specifies:
 
 - One tick is 33 ms — 22 % of §7's 0.15 s dash i-frame and 28 % of its 0.12 s
   input buffer. The "enak" feel §7 is aiming for gets quantised away.
@@ -166,10 +172,18 @@ doc itself specifies:
 - A 14 u/s dash advances 0.47 u per tick against a 0.4-radius capsule, so the
   player can tunnel through thin props (§7's collision is discrete, not swept).
 
-Logic for one player plus §9's 18-enemy cap is nowhere near the CPU budget — a
-Snapdragon 680 is GPU-bound here, and §3's budget is a *GPU* budget. The
-recommendation is `FIXED_HZ = 60` with tick-parity staggering: movement,
-collision, camera and hitboxes every tick; AI, status effects and spawning on
-even ticks, which §9 already asks for. Decide this before `PlayerController`
-exists, because dash, coyote time and the input buffer are all written against
-the tick length.
+Also worth knowing: on the 120 Hz handset this was measured on, 30 Hz logic means
+**four rendered frames per logic tick** — input sampled once every four frames
+the player actually sees. Interpolation hides that for a spinning cube. It does
+not hide it for a dash.
+
+Logic for one player plus §9's 18-enemy cap is nowhere near the CPU budget — the
+whole frame measured 0.2 ms of CPU on device, and §3's budget is a *GPU* budget.
+A Snapdragon 680 is GPU-bound here too, so doubling the tick rate is close to
+free.
+
+**What this obliges us to do from Phase 5:** stagger the systems that are
+expensive but tolerate latency onto even ticks — AI, status effects, spawn
+director — which §9 already asks for. Movement, collision, camera and hitboxes
+run every tick; those are what the extra rate buys. If a later phase blows the
+CPU budget, staggering is the first lever, not reverting the tick rate.
