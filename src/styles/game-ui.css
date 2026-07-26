@@ -67,17 +67,6 @@
   z-index: 20;
 }
 
-/* CROSS-FILE FIX — belongs in main.css, but that file is the integrator's.
-   `.rotate-hint` is a full-width strip pinned to the bottom edge at z-index 60,
-   and unlike `.profiler` it never opted out of pointer events. In portrait it
-   therefore eats every touch in the bottom ~30 px of the screen: the lower slice
-   of `.tc__stick-zone` and, worse, the bottom of the attack and dash buttons.
-   A static nudge must never be a touch target. Targeted by id so it wins on
-   specificity no matter which stylesheet the bundler emits first. */
-#rotate-hint {
-  pointer-events: none;
-}
-
 /* ===========================================================================
    HUD — §6's top bar: HP / MP / level chip top-left, icon row top-right
    =========================================================================== */
@@ -626,8 +615,11 @@
 /* Order matters: nomana, then cooldown, then disabled, then pressed. Pressed
    must always be visible, and disabled must always beat the two soft states. */
 
+/* Neutral grey, deliberately not a blue: overriding the tint recolours the whole
+   button, and a blue "no mana" ring on the fire slot reads as an ice element at
+   a glance. Grey reads as depleted, which is what it means. */
 .tc__btn.is-nomana {
-  --tc-tint: #5c86c9;
+  --tc-tint: #6f7889;
 }
 
 .tc__btn.is-nomana .tc__btn-icon {
@@ -700,8 +692,12 @@
     top: 50%;
   }
 
+  /* 52 px, not 24: main.css's `.rotate-hint` occupies roughly the bottom
+     14-43 px in portrait at z-index 60, so a smaller lift renders "rotate your
+     device" straight across the attack and dash buttons. Clearing it also moves
+     the cluster further off the system gesture bar. */
   .tc__buttons {
-    bottom: calc(var(--ad-safe-b) + 24px);
+    bottom: calc(var(--ad-safe-b) + 52px);
   }
 }
 

@@ -264,6 +264,13 @@ body {
   letter-spacing: 0.1em;
   text-align: center;
   z-index: 60;
+  /*
+   * A static nudge must never be a touch target. This strip spans the full width
+   * at z-index 60, so with pointer events on it swallowed every touch in the
+   * bottom ~30 px in portrait — including the lower half of the attack and dash
+   * buttons, which is unplayable and invisible in desktop testing.
+   */
+  pointer-events: none;
 }
 
 /* Landscape is the primary layout (§6); nudge, don't block. */
