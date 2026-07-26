@@ -1,35 +1,131 @@
 /* ===========================================================================
-   ARCANUM DRIFT — game UI: HUD (§6 top-left) and touch controls (§6 bottom).
-   Palette, safe-area vars and the #ui-root overlay rules come from main.css.
+   ARCANUM DRIFT — game-ui.css
+   Two things live here and nothing else:
+     1. the HUD skin                (DOM owned by src/ui/HUD.ts)
+     2. the touch-control skin      (DOM owned by src/ui/TouchControls.ts)
 
-   Performance rules this file obeys (§3, §13): only `transform` and `opacity`
-   animate, no backdrop-filter over large areas, no blur, and no box-shadow on
-   anything that moves.
+   main.css owns the palette (--ad-*), the safe-area vars, `.hud-btn`, `#app`,
+   `#game-canvas` and `.ui-root`. Nothing here redefines any of them.
+
+   PERFORMANCE CONTRACT (§3, §13)
+   - Only `transform` and `opacity` are ever transitioned or animated.
+   - No backdrop-filter, no `filter: blur`, no box-shadow on anything that moves.
+   - Bars are scaled with `transform: scaleX()`, never `width` — `width` would
+     invalidate layout for the whole overlay on every hit.
+   - Every decorative gradient is static, so it rasterises once and then costs
+     nothing. That includes the joystick dial and the cooldown wedge.
+
+   LAYOUT INVARIANTS (§6 — measured, not aspirational)
+   - Every touch target is >= 56 px in both axes; every gap is >= 10 px.
+   - `.tc__stick-zone` can never reach `.tc__buttons`: its width is capped at
+     `100% - var(--tc-cluster-clear)`, i.e. the cluster width + its edge inset +
+     the right safe area + 20 px of slack. Dragging to walk therefore cannot
+     land on a skill button on any viewport, however narrow.
+   - `.tc__look-zone`'s left edge IS `.tc__stick-zone`'s right edge, so the two
+     tile the screen with neither a gap nor an overlap.
+   - Landscape is primary. Portrait only moves the walk zone down and re-flows
+     the HUD icon row; nothing becomes unreachable.
    =========================================================================== */
 
-/* ------------------------------------------------------------------- HUD */
+/* ---------------------------------------------------------------------------
+   Overlay roots
 
-.hud {
+   `.ui-root > *` in main.css turns pointer events back ON for every direct
+   child of the overlay. Both roots below are full-screen, so inheriting that
+   would swallow every touch meant for the canvas. They opt out again and each
+   widget opts back in individually. The `.ui-root > ...` half of the selector
+   exists so this wins on specificity (0,2,0 vs 0,1,0) whichever order the two
+   stylesheets happen to load in.
+
+   Geometry note: `.ui-root` is `absolute; inset: 0` inside `#app`
+   (`fixed; inset: 0`), and absolutely positioned children resolve against the
+   *padding* box, so `.ui-root`'s safe-area padding does not inset these roots.
+   Local (0,0) is viewport (0,0) — which is what TouchControls relies on when it
+   positions the joystick from raw `clientX`/`clientY` — and the safe-area
+   offsets applied to the widgets below are applied exactly once.
+   --------------------------------------------------------------------------- */
+
+.hud,
+.ui-root > .hud,
+.tc,
+.ui-root > .tc {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
+
+/* Under the profiler (40) and the DBG button (50) so debug chrome stays usable.
+   The HUD sits above the touch layer so its icon row wins over the look zone. */
+.hud {
+  z-index: 30;
+}
+
+.tc {
+  z-index: 20;
+}
+
+/* CROSS-FILE FIX — belongs in main.css, but that file is the integrator's.
+   `.rotate-hint` is a full-width strip pinned to the bottom edge at z-index 60,
+   and unlike `.profiler` it never opted out of pointer events. In portrait it
+   therefore eats every touch in the bottom ~30 px of the screen: the lower slice
+   of `.tc__stick-zone` and, worse, the bottom of the attack and dash buttons.
+   A static nudge must never be a touch target. Targeted by id so it wins on
+   specificity no matter which stylesheet the bundler emits first. */
+#rotate-hint {
+  pointer-events: none;
+}
+
+/* ===========================================================================
+   HUD — §6's top bar: HP / MP / level chip top-left, icon row top-right
+   =========================================================================== */
+
+.hud {
+  /* index.html pins a 56 px DBG button to the top-right corner; 56 + a 10 px
+     gap keeps the icon row clear of it. Harmless slack in a release build that
+     strips the button. */
+  --hud-dbg-clear: 66px;
+  --hud-bar-h: 15px;
+  /* One shear angle for the bars and the level chip so they read as one system. */
+  --hud-skew: -12deg;
+}
+
+/* ------------------------------------------------------------- vitals cluster */
 
 .hud__vitals {
   position: absolute;
   top: calc(var(--ad-safe-t) + 8px);
-  /* Clear of the profiler overlay, which sits at the same corner. */
-  left: calc(var(--ad-safe-l) + 176px);
+  left: calc(var(--ad-safe-l) + 10px);
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Read-only chrome: a swipe across your own HP bar must still reach the
+     camera underneath. */
+  pointer-events: none;
+}
+
+/* The debug profiler occupies this exact corner while it is visible, and §6
+   wants the vitals top-left in the shipping layout. Rather than permanently
+   displacing the vitals to dodge dev chrome, drop them below the profiler only
+   while it is on screen. Profiler.setVisible writes `display: none` inline, so
+   the absence of "none" in the style attribute is a reliable "profiler is up"
+   signal. If a browser lacks `:has()` the rule is simply dropped, and the only
+   consequence is a cosmetic overlap in debug builds. */
+.ui-root:has(#profiler:not([style*='none'])) .hud__vitals {
+  top: calc(var(--ad-safe-t) + 184px);
 }
 
 .hud__bars {
-  width: min(232px, 36vw);
   display: flex;
   flex-direction: column;
   gap: 5px;
+  /* §6's diagram draws HP and MP side by side on one line. Stacked instead: on
+     a 360 px-wide phone two side-by-side bars come out ~85 px each, which is
+     not readable at arm's length. Stacking gives each the full width for the
+     same total footprint. */
+  width: clamp(152px, 30vw, 236px);
 }
 
 .hud__bar {
@@ -39,351 +135,605 @@
 }
 
 .hud__bar-key {
+  flex: 0 0 auto;
   width: 20px;
-  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   color: var(--ad-ink-dim);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.8);
 }
 
 .hud__bar-track {
   position: relative;
-  flex: 1;
-  height: 15px;
-  border: 1px solid var(--ad-panel-line);
-  border-radius: 3px;
-  background: rgba(6, 9, 14, 0.66);
+  flex: 1 1 auto;
+  height: var(--hud-bar-h);
   overflow: hidden;
+  border: 1px solid var(--ad-panel-line);
+  background: rgba(6, 9, 15, 0.7);
+  /* Sheared parallelogram — §5's "strong silhouette" for the price of nothing.
+     Children carrying text counter-shear so the digits stay upright. */
+  transform: skewX(var(--hud-skew));
+}
+
+/* Segment ticks, painted ABOVE the fill (::after follows the in-flow children)
+   so the bar can be read at a glance instead of having to judge a bare block.
+   Static background image: rasterised once. */
+.hud__bar-track::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0) 11px,
+    rgba(6, 9, 15, 0.55) 11px,
+    rgba(6, 9, 15, 0.55) 12px
+  );
 }
 
 .hud__bar-fill {
   position: absolute;
   inset: 0;
-  /* scaleX from the left edge: no reflow, and it animates on the compositor. */
+  /* HUD.ts writes `transform: scaleX(0..1)`. The origin must stay at the left
+     edge or the bar drains from its middle. */
   transform-origin: 0 50%;
   transform: scaleX(1);
-  transition: transform 140ms linear;
-  will-change: transform;
+  /* Vertical gradient only: a horizontal one would squash as the bar drains and
+     the colour would drift with the value. */
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.34) 0%,
+    rgba(255, 255, 255, 0.06) 48%,
+    rgba(0, 0, 0, 0.24) 100%
+  );
 }
 
 .hud__bar--hp .hud__bar-fill {
-  background: linear-gradient(90deg, #b8324a, #e35d5d);
+  background-color: #ff6b6b;
 }
 
 .hud__bar--mp .hud__bar-fill {
-  background: linear-gradient(90deg, #2f6ea8, #56b8e3);
+  background-color: #58b4ff;
+}
+
+/* MP is the secondary pool: shorter and slimmer, so the eye finds HP first. */
+.hud__bar--mp {
+  padding-right: 18px;
+}
+
+.hud__bar--mp .hud__bar-track {
+  height: 11px;
 }
 
 .hud__bar-num {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  color: var(--ad-ink);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  right: 7px;
+  top: 0;
+  bottom: 0;
+  /* Above the tick overlay as well as the fill. */
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  transform: skewX(calc(-1 * var(--hud-skew)));
+  font-size: 9px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: var(--ad-ink);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
 }
 
-/* Low health has to read peripherally, while the player is watching the fight. */
-.hud__bar--hp.is-critical .hud__bar-track {
-  border-color: rgba(255, 107, 107, 0.75);
-  animation: hud-critical 900ms ease-in-out infinite;
+/* Critical HP: pulse the fill's opacity only. Compositor-cheap, and it reads
+   from the corner of the eye, which is the whole point on a small screen. */
+.hud__bar--hp.is-critical .hud__bar-fill {
+  animation: hud-hp-crit 880ms ease-in-out infinite;
 }
 
-@keyframes hud-critical {
+@keyframes hud-hp-crit {
   0%,
   100% {
     opacity: 1;
   }
   50% {
-    opacity: 0.55;
+    opacity: 0.42;
   }
 }
 
+/* --------------------------------------------------------------- level chip */
+
 .hud__level {
-  display: flex;
-  align-items: baseline;
-  gap: 3px;
-  padding: 3px 9px;
-  border: 1px solid rgba(127, 227, 196, 0.4);
-  border-radius: 3px;
-  background: rgba(6, 9, 14, 0.66);
-  color: var(--ad-accent);
-  font-size: 11px;
-  letter-spacing: 0.1em;
+  flex: 0 0 auto;
+  display: grid;
+  justify-items: center;
+  min-width: 38px;
+  padding: 2px 9px 3px;
+  border: 1px solid var(--ad-panel-line);
+  background: var(--ad-panel);
+  transform: skewX(var(--hud-skew));
+  pointer-events: none;
+}
+
+.hud__level-key,
+.hud__level-num {
+  display: block;
+  transform: skewX(calc(-1 * var(--hud-skew)));
 }
 
 .hud__level-key {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   color: var(--ad-ink-dim);
-  font-size: 9px;
 }
 
 .hud__level-num {
+  margin-top: -1px;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.05;
   font-variant-numeric: tabular-nums;
+  color: var(--ad-warn);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
 }
+
+/* ------------------------------------------------------------- icon row (TR) */
 
 .hud__icons {
   position: absolute;
-  top: calc(var(--ad-safe-t) + 8px);
-  /* Left of the DBG button, which main.css pins to the right edge. */
-  right: calc(var(--ad-safe-r) + 70px);
+  top: calc(var(--ad-safe-t) + 6px);
+  right: calc(var(--ad-safe-r) + 6px + var(--hud-dbg-clear));
   display: flex;
   gap: 10px;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
-/*
- * Inherits size, border and press feedback from main.css's `.hud-btn`, but that
- * class is absolutely positioned for the standalone DBG button — inside this flex
- * row it has to participate in layout instead.
- */
-.hud__icon {
+/* `.hud-btn` in main.css is `position: absolute` (it was written for the pinned
+   DBG button). Two classes beat one, so this wins whichever order the
+   stylesheets load in — and the 56 px minimums come along for free. */
+.hud__icons .hud-btn {
   position: relative;
-  top: auto;
-  right: auto;
-  font-size: 19px;
+  pointer-events: auto;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ad-ink);
 }
 
-/* aria-disabled, not :disabled — the buttons keep their press feedback (Phase 6). */
-.hud__icon[aria-disabled='true'] {
-  opacity: 0.45;
+/* Placeholder until Phase 4/6 wires the screen behind it: present and pressable,
+   but visibly not yet a live control. */
+.hud__icons .hud-btn[data-todo] {
+  color: var(--ad-ink-dim);
 }
 
-/* --------------------------------------------------------- touch controls */
+/* ===========================================================================
+   TOUCH CONTROLS — §6
+   DOM contract, exactly as TouchControls.ts builds it:
+     .tc
+       .tc__stick-zone[data-zone=move]
+       .tc__look-zone[data-zone=look]
+       .tc__stick            -> .tc__stick-base + .tc__stick-knob
+       .tc__buttons          -> 4x .tc__btn.tc__btn--skill[data-slot=0..3]
+                                1x .tc__btn.tc__btn--attack[data-action=attack]
+                                1x .tc__btn.tc__btn--dash[data-action=dash]
+                                each -> .tc__btn-icon + .tc__btn-cd + .tc__btn-cd-text
+   State classes on .tc__btn: is-pressed, is-cooldown, is-nomana, is-disabled.
+   State class on .tc__stick: is-active.
+   =========================================================================== */
 
 .tc {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  touch-action: none;
+  /* 56 px is §6.3's hard floor. 60 px is the comfortable default; the
+     short-viewport query below is the only place it drops, and only to 56. */
+  --tc-btn: 60px;
+  --tc-gap: 12px;
+  --tc-edge: 14px;
+  --tc-cluster-w: calc(var(--tc-btn) * 2 + var(--tc-gap));
+  /* Everything the button cluster reserves horizontally, plus 20 px of slack. */
+  --tc-cluster-clear: calc(var(--tc-cluster-w) + var(--tc-edge) + var(--ad-safe-r) + 20px);
+  /* The single split line: walk zone ends here, look zone starts here. */
+  --tc-split: min(42%, calc(100% - var(--tc-cluster-clear)));
+  --tc-stick-base: 120px;
+  --tc-stick-knob: 46px;
+  --tc-cd-scrim: rgba(6, 9, 15, 0.74);
 }
 
-/*
- * §6: left third moves, the rest is camera swipe. The stick zone stops short of
- * the bottom-right cluster, so dragging to walk can never land on a button.
- */
-.tc__stick-zone {
+/* ------------------------------------------------------------------- zones */
+
+.tc__stick-zone,
+.tc__look-zone {
   position: absolute;
-  left: 0;
-  bottom: 0;
-  top: 88px;
-  width: 42%;
+  z-index: 1;
   pointer-events: auto;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Left and lower. The top strip is left to the look zone, so a thumb that
+   starts up by the HUD orbits the camera rather than doing nothing. */
+.tc__stick-zone {
+  left: 0;
+  bottom: 0;
+  top: 28%;
+  width: var(--tc-split);
 }
 
 .tc__look-zone {
-  position: absolute;
-  left: 42%;
+  top: 0;
   right: 0;
-  top: 88px;
   bottom: 0;
-  pointer-events: auto;
-  touch-action: none;
+  left: var(--tc-split);
 }
 
-/* Positioned at the touch point in JS (§6.1: dynamic origin), so no fixed spot. */
+/* ---------------------------------------------------------------- joystick */
+
+/* Zero-sized anchor. TouchControls.ts moves it with an inline
+   `transform: translate(clientX px, clientY px)` (§6.1's dynamic origin), so
+   nothing here may set `transform` on `.tc__stick` — and its coordinate origin
+   has to be the viewport origin, which is why it is `fixed`. */
 .tc__stick {
   position: fixed;
-  top: 0;
   left: 0;
+  top: 0;
   width: 0;
   height: 0;
+  z-index: 2;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 120ms ease;
-  z-index: 20;
+  /* Opacity only. Never transition `transform` on the stick or the knob: a
+     120 ms ease there is a joystick that lags the thumb, which is precisely the
+     failure §6 is written to prevent. */
+  transition: opacity 140ms ease;
 }
 
 .tc__stick.is-active {
   opacity: 1;
 }
 
+/* Centred on the anchor with negative margins rather than a translate, which
+   leaves `transform` free for the appear-pop below. */
 .tc__stick-base {
   position: absolute;
-  width: 118px;
-  height: 118px;
-  margin: -59px 0 0 -59px;
-  border: 2px solid rgba(232, 230, 223, 0.28);
+  left: 0;
+  top: 0;
+  width: var(--tc-stick-base);
+  height: var(--tc-stick-base);
+  margin-left: calc(var(--tc-stick-base) / -2);
+  margin-top: calc(var(--tc-stick-base) / -2);
   border-radius: 50%;
-  background: rgba(10, 13, 20, 0.3);
+  border: 1px solid rgba(232, 230, 223, 0.22);
+  /* Arcane dial: 24 static tick marks plus a soft well. Both are background
+     layers, so the whole thing costs one rasterisation and no per-frame work. */
+  background-image: repeating-conic-gradient(
+      from 0deg,
+      rgba(232, 230, 223, 0.3) 0deg 1.4deg,
+      rgba(0, 0, 0, 0) 1.4deg 15deg
+    ),
+    radial-gradient(
+      circle at 50% 50%,
+      rgba(10, 13, 20, 0.52) 0%,
+      rgba(10, 13, 20, 0.14) 68%,
+      rgba(0, 0, 0, 0) 72%
+    );
+  transform: scale(0.86);
+  transition: transform 130ms ease;
 }
 
+.tc__stick.is-active .tc__stick-base {
+  transform: scale(1);
+}
+
+/* NOT centred here, on purpose: TouchControls.ts writes
+   `translate(calc(-50% + dx), calc(-50% + dy))` inline, so the -50% centring is
+   already part of its transform. A margin offset here would double it and the
+   knob would sit half a knob up and to the left of the thumb. */
 .tc__stick-knob {
   position: absolute;
-  width: 52px;
-  height: 52px;
+  left: 0;
+  top: 0;
+  width: var(--tc-stick-knob);
+  height: var(--tc-stick-knob);
   border-radius: 50%;
-  border: 1px solid rgba(127, 227, 196, 0.55);
-  background: rgba(127, 227, 196, 0.22);
-  transform: translate(-50%, -50%);
+  border: 2px solid var(--ad-accent);
+  /* A radial gradient, not a box-shadow glow: this element moves every frame and
+     a shadow on it would repaint the stick each time (§13). */
+  background-image: radial-gradient(
+    circle at 50% 38%,
+    rgba(232, 230, 223, 0.9) 0%,
+    rgba(127, 227, 196, 0.55) 46%,
+    rgba(10, 13, 20, 0.78) 100%
+  );
   will-change: transform;
 }
 
+/* ------------------------------------------------------------ button cluster */
+
+/* §6's arrangement falls straight out of the DOM order TouchControls.ts builds
+   (skills 0..3, attack, dash) once the grid is two columns wide:
+       S1 S2      ->  ⚡ ❄
+       S3 S4      ->  🔥 🌀
+       atk dash   ->  ⚔  ⤢
+   A fixed grid rather than the diagram's staggered arc: staggering means
+   offsetting rows, which eats into the 10 px inter-button gap §6.3 requires.
+   Predictable beats pretty when the failure mode is a mis-tapped skill. */
 .tc__buttons {
   position: absolute;
-  right: calc(var(--ad-safe-r) + 14px);
-  bottom: calc(var(--ad-safe-b) + 14px);
+  right: calc(var(--ad-safe-r) + var(--tc-edge));
+  bottom: calc(var(--ad-safe-b) + var(--tc-edge));
+  z-index: 3;
   display: grid;
-  /* Two rows of three: skills above, action buttons below (§6's diagram). */
-  grid-template-columns: repeat(3, 64px);
-  gap: 12px;
-  pointer-events: auto;
-  z-index: 30;
+  grid-template-columns: repeat(2, var(--tc-btn));
+  gap: var(--tc-gap);
+  justify-items: center;
+  /* The container is inert so the gaps between buttons stay available to the
+     camera-swipe zone underneath; each button opts back in. */
+  pointer-events: none;
 }
 
 .tc__btn {
-  /* §6.3: 56 px is the floor; 64 px is comfortable for a thumb in motion. */
+  /* One tint per button drives the ring, the glyph and the cooldown edge, so a
+     new element is a one-line change. */
+  --tc-tint: var(--ad-accent);
   position: relative;
-  width: 64px;
-  height: 64px;
+  width: var(--tc-btn);
+  height: var(--tc-btn);
+  /* Belt and braces: §6.3's floor holds even if --tc-btn is ever mis-set. */
+  min-width: 56px;
+  min-height: 56px;
+  margin: 0;
   padding: 0;
   display: grid;
   place-items: center;
-  border: 1px solid var(--ad-panel-line);
+  appearance: none;
+  -webkit-appearance: none;
+  border: 2px solid var(--tc-tint);
   border-radius: 50%;
-  background: rgba(10, 13, 20, 0.6);
-  color: var(--ad-ink);
+  background-color: rgba(10, 13, 20, 0.58);
+  background-image: radial-gradient(
+    circle at 50% 34%,
+    rgba(232, 230, 223, 0.13) 0%,
+    rgba(0, 0, 0, 0) 70%
+  );
+  color: var(--tc-tint);
   font: inherit;
   cursor: pointer;
+  overflow: hidden;
+  pointer-events: auto;
   touch-action: none;
   user-select: none;
-  overflow: hidden;
-  transition: transform 80ms ease, border-color 120ms ease;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  /* transform/opacity only — see the performance contract at the top. */
+  transition: transform 80ms ease, opacity 110ms linear;
+}
+
+/* Inner hairline ring: depth without a shadow. */
+.tc__btn::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  border: 1px solid rgba(232, 230, 223, 0.1);
+  pointer-events: none;
+}
+
+.tc__btn:focus {
+  outline: none;
+}
+
+.tc__btn:focus-visible {
+  outline: 2px solid var(--ad-ink);
+  outline-offset: 2px;
+}
+
+/* Elemental tints, matching §6's ⚡ ❄ 🔥 🌀 order. */
+.tc__btn--skill[data-slot='0'] {
+  --tc-tint: #c9a4ff;
+}
+
+.tc__btn--skill[data-slot='1'] {
+  --tc-tint: #9fe0ff;
+}
+
+.tc__btn--skill[data-slot='2'] {
+  --tc-tint: #ff9a5c;
+}
+
+.tc__btn--skill[data-slot='3'] {
+  --tc-tint: #8fe6bf;
+}
+
+/* Attack is the most-pressed button: brightest ring, largest glyph, so the thumb
+   finds it without looking. */
+.tc__btn--attack {
+  --tc-tint: #f2ede0;
+  background-color: rgba(20, 26, 38, 0.66);
+}
+
+.tc__btn--attack .tc__btn-icon {
+  font-size: 27px;
+}
+
+.tc__btn--dash {
+  --tc-tint: var(--ad-warn);
 }
 
 .tc__btn-icon {
   position: relative;
-  z-index: 2;
+  z-index: 1;
+  display: block;
   font-size: 24px;
   line-height: 1;
+  color: var(--tc-tint);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
   pointer-events: none;
+  transition: opacity 110ms linear;
 }
 
-/*
- * The cooldown sweep. `--cd` runs 1 -> 0 as the cooldown expires, so the dark
- * wedge shrinks clockwise. A conic-gradient costs one fragment op; a canvas or an
- * SVG animation would cost a lot more (§3).
- */
+/* ----------------------------------------------------------- cooldown sweep */
+
+/* POLARITY, as TouchControls.refreshButton writes it:
+   `--cd` on `.tc__btn` is `cooldownLeft / cooldownTotal` — the fraction of the
+   cooldown REMAINING. It is 1 the instant the button is pressed and falls to 0
+   when the skill is ready again.
+
+   So the dark wedge covers the remaining fraction and sweeps away clockwise from
+   12 o'clock, with a 4 deg leading edge in the button's own tint. At a 60 px
+   diameter that edge is ~2 px of arc: enough to see the thing moving in
+   daylight, which a plain scrim boundary is not. The seconds digit does the
+   precise reading — §6.3 asks for both, and on a small screen they do different
+   jobs. */
 .tc__btn-cd {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 2;
+  border-radius: 50%;
   pointer-events: none;
   opacity: 0;
-  background: conic-gradient(
-    rgba(6, 9, 14, 0.78) calc(var(--cd, 0) * 360deg),
-    rgba(6, 9, 14, 0) 0
+  transition: opacity 110ms linear;
+  background-image: conic-gradient(
+    from -90deg,
+    var(--tc-cd-scrim) 0deg,
+    var(--tc-cd-scrim) calc(var(--cd, 0) * 360deg - 4deg),
+    var(--tc-tint) calc(var(--cd, 0) * 360deg - 4deg),
+    var(--tc-tint) calc(var(--cd, 0) * 360deg),
+    rgba(0, 0, 0, 0) calc(var(--cd, 0) * 360deg)
   );
 }
 
 .tc__btn-cd-text {
   position: absolute;
+  inset: 0;
   z-index: 3;
-  bottom: 5px;
-  font-size: 11px;
+  display: grid;
+  place-items: center;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
   color: var(--ad-ink);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
   pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms linear;
 }
 
-.tc__btn--skill {
-  border-color: rgba(127, 227, 196, 0.34);
+/* ------------------------------------------------------------ button states */
+
+/* Order matters: nomana, then cooldown, then disabled, then pressed. Pressed
+   must always be visible, and disabled must always beat the two soft states. */
+
+.tc__btn.is-nomana {
+  --tc-tint: #5c86c9;
 }
 
-.tc__btn--attack {
-  border-color: rgba(255, 209, 102, 0.45);
-  grid-column: 2;
+.tc__btn.is-nomana .tc__btn-icon {
+  opacity: 0.5;
 }
 
-.tc__btn--dash {
-  border-color: rgba(160, 200, 255, 0.45);
-  grid-column: 3;
-}
-
-/* --- button states (§6.8) ------------------------------------------------ */
-
-.tc__btn.is-pressed {
-  transform: scale(0.9);
-  border-color: var(--ad-accent);
-}
-
-.tc__btn.is-cooldown .tc__btn-cd {
+.tc__btn.is-cooldown .tc__btn-cd,
+.tc__btn.is-cooldown .tc__btn-cd-text {
   opacity: 1;
 }
 
 .tc__btn.is-cooldown .tc__btn-icon {
-  opacity: 0.5;
-}
-
-.tc__btn.is-nomana {
-  border-color: rgba(255, 107, 107, 0.5);
-}
-
-.tc__btn.is-nomana .tc__btn-icon {
-  opacity: 0.4;
+  opacity: 0.3;
 }
 
 .tc__btn.is-disabled,
 .tc__btn:disabled {
-  opacity: 0.35;
+  opacity: 0.28;
+  pointer-events: none;
   cursor: default;
 }
 
-/* --------------------------------------------------------------- portrait */
+.tc__btn.is-pressed {
+  transform: scale(0.9);
+  background-color: rgba(232, 230, 223, 0.18);
+}
 
-/*
- * Landscape is primary (§6). Portrait stays playable: the zones split lower down
- * so the controls sit within thumb reach, and the HUD drops below the profiler
- * instead of trying to share its row.
- */
-@media (orientation: portrait) and (max-width: 820px) {
-  .hud__vitals {
-    left: calc(var(--ad-safe-l) + 8px);
-    top: calc(var(--ad-safe-t) + 190px);
+.tc__btn.is-pressed .tc__btn-icon {
+  opacity: 1;
+}
+
+/* ===========================================================================
+   RESPONSIVE
+   =========================================================================== */
+
+/* Short viewports (SE-class landscape, ~320 px tall): 3 rows of 56 px plus two
+   10 px gaps is 188 px, which still clears the safe-area insets top and bottom. */
+@media (max-height: 400px) {
+  .tc {
+    --tc-btn: 56px;
+    --tc-gap: 10px;
+    --tc-edge: 10px;
+    --tc-stick-base: 108px;
+    --tc-stick-knob: 42px;
+  }
+
+  .hud {
+    --hud-bar-h: 13px;
   }
 
   .hud__bars {
-    width: min(210px, 54vw);
+    width: clamp(140px, 26vw, 200px);
   }
+}
 
-  .hud__icons {
-    right: calc(var(--ad-safe-r) + 8px);
-    top: calc(var(--ad-safe-t) + 70px);
+/* Roomy landscape: bigger targets, since there is space to spend on them. */
+@media (min-width: 900px) and (min-height: 440px) {
+  .tc {
+    --tc-btn: 64px;
+    --tc-gap: 14px;
+    --tc-edge: 18px;
   }
+}
 
+/* Portrait is secondary but must stay playable (§6). The walk zone starts lower
+   so the upper screen becomes camera, and the cluster lifts clear of the
+   system gesture bar. */
+@media (orientation: portrait) {
   .tc__stick-zone {
-    width: 100%;
-    top: 55%;
-    bottom: 42%;
-  }
-
-  .tc__look-zone {
-    left: 0;
-    top: 88px;
-    bottom: 45%;
+    top: 50%;
   }
 
   .tc__buttons {
-    grid-template-columns: repeat(3, 60px);
-    gap: 10px;
+    bottom: calc(var(--ad-safe-b) + 24px);
   }
+}
 
-  .tc__btn {
-    width: 60px;
-    height: 60px;
+/* A horizontal icon row is 3x56 + 2x10 = 188 px; add the DBG clearance and the
+   vitals and it does not fit across a 360 px screen, so it becomes a right-edge
+   column. Gated on portrait: in short landscape a 188 px column would collide
+   with the top row of the button cluster.
+
+   The column tucks UNDER the DBG button rather than beside it. Measured on a
+   320 px-wide viewport: beside it the column's left edge lands at x=192 while
+   the vitals reach x=210, so the two collide. Underneath, the column sits at
+   x=258 and clears the vitals by ~48 px while the bars keep their full width. */
+@media (orientation: portrait) and (max-width: 620px) {
+  .hud__icons {
+    flex-direction: column;
+    top: calc(var(--ad-safe-t) + 6px + var(--hud-dbg-clear));
+    right: calc(var(--ad-safe-r) + 6px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hud__bar-fill {
-    transition: none;
+  .hud__bar--hp.is-critical .hud__bar-fill {
+    animation: none;
+    opacity: 0.7;
   }
 
-  .tc__stick {
-    transition: none;
+  .tc__stick,
+  .tc__stick-base,
+  .tc__btn,
+  .tc__btn-icon,
+  .tc__btn-cd,
+  .tc__btn-cd-text {
+    transition-duration: 0s;
   }
 }
