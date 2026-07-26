@@ -14,7 +14,6 @@ import type { AIContext } from './AIBrain';
 import { ArchetypeEnemy, EnemyProjectiles } from './ArchetypeEnemy';
 import type { EnemyBase } from './EnemyBase';
 import type { EnemyDef as ArchetypeDef } from './EnemyDefs';
-import { SlimeEnemy } from './SlimeEnemy';
 
 /**
  * Owns the enemy population: spawning, §9's staggered brain updates, despawn
@@ -113,6 +112,12 @@ export class EnemyManager implements System {
   private seedCursor = 1237;
   /** Phase 5: ONE projectile slab shared by every enemy, built on first need. */
   private projectiles: EnemyProjectiles | null = null;
+  /**
+   * Phase 5: the one scripted boss (spawnBoss). Exempt from purgeDead — its
+   * corpse must not be reclaimed, because the HUD's boss bar keeps reading the
+   * object and a purged boss could never be revived by reset().
+   */
+  private bossExempt: EnemyBase | null = null;
 
   /** Callback context for the pre-bound overlap visitor (§13: no closures). */
   private hitSource: EnemyBase | null = null;
@@ -142,7 +147,9 @@ export class EnemyManager implements System {
     for (let i = 0; i < enemies.length; i++) {
       const enemy = enemies[i];
       if (enemy === undefined) continue;
-      if (!enemy.alive) {
+      // The scripted boss is never reclaimed (see bossExempt) — its corpse
+      // outlives the kill so the HUD bar and a later reset() still reach it.
+      if (!enemy.alive && enemy !== this.bossExempt) {
         this.hitbox.unregister(enemy);
         if (this.boardsRef !== null) this.boardsRef.unregister(enemy);
         this.scene.remove(enemy.root);
@@ -157,43 +164,6 @@ export class EnemyManager implements System {
     return purged;
   }
 
-  /** Test spawner: N slimes ringed around a point. SpawnDirector replaces in Phase 5. */
-  spawnSlimes(centerX: number, centerZ: number, count: number, ringRadius: number): void {
-    // Reclaim slots first, then respect §9's cap. A spawner that can exhaust
-    // the hitbox registry is a bug factory in every later phase.
-    this.purgeDead();
-    const room = EnemyManager.MAX_ENEMIES - this.enemies.length;
-    if (count > room) count = room;
-    if (count <= 0) return;
-    const field = this.field;
-    const minX = field.minX + SPAWN_MARGIN;
-    const maxX = field.maxX - SPAWN_MARGIN;
-    const minZ = field.minZ + SPAWN_MARGIN;
-    const maxZ = field.maxZ - SPAWN_MARGIN;
-    for (let i = 0; i < count; i++) {
-      const angle = count > 0 ? (i / count) * Math.PI * 2 : 0;
-      let homeX = centerX + Math.sin(angle) * ringRadius;
-      let homeZ = centerZ + Math.cos(angle) * ringRadius;
-      if (homeX < minX) homeX = minX;
-      else if (homeX > maxX) homeX = maxX;
-      if (homeZ < minZ) homeZ = minZ;
-      else if (homeZ > maxZ) homeZ = maxZ;
-
-      this.seedCursor = (this.seedCursor + 7919) | 0;
-      const slime = new SlimeEnemy({
-        id: nextEnemyId++,
-        field,
-        homeX,
-        homeZ,
-        seed: this.seedCursor,
-      });
-      this.scene.add(slime.root);
-      this.hitbox.register(slime);
-      if (this.boardsRef !== null) this.boardsRef.register(slime);
-      this.enemies.push(slime);
-    }
-  }
-
   /**
    * Phase 5: spawn one enemy from a validated enemies.json def (§4.1 extended
    * to enemies — the def carries body, stats and attack; no kind reaches
@@ -201,7 +171,7 @@ export class EnemyManager implements System {
    * Spawns are director-managed: they never self-respawn — SpawnDirector owns
    * the population and death releases its budget.
    */
-  spawnDef(def: ArchetypeDef, x: number, z: number): EnemyBase | null {
+  spawnDef(def: ArchetypeDef, x: number, z: number, directorManaged = true): EnemyBase | null {
     this.purgeDead();
     if (this.enemies.length >= EnemyManager.MAX_ENEMIES) return null;
     const field = this.field;
@@ -212,14 +182,7 @@ export class EnemyManager implements System {
     if (homeZ < field.minZ + SPAWN_MARGIN) homeZ = field.minZ + SPAWN_MARGIN;
     else if (homeZ > field.maxZ - SPAWN_MARGIN) homeZ = field.maxZ - SPAWN_MARGIN;
 
-    if (this.projectiles === null) {
-      this.projectiles = new EnemyProjectiles({
-        scene: this.scene,
-        hitbox: this.hitbox,
-        damage: this.damage,
-        field,
-      });
-    }
+    const projectiles = this.sharedProjectiles();
 
     this.seedCursor = (this.seedCursor + 7919) | 0;
     const enemy = new ArchetypeEnemy({
@@ -231,15 +194,54 @@ export class EnemyManager implements System {
       seed: this.seedCursor,
       hitbox: this.hitbox,
       damage: this.damage,
-      projectiles: this.projectiles,
+      projectiles,
       props: this.propsRef,
-      directorManaged: true,
+      // Director-managed enemies never self-respawn — population is the
+      // director's job. Gate/debug spawns keep EnemyBase's 12 s home respawn,
+      // which the Phase 3 gate asserts.
+      directorManaged,
     });
     this.scene.add(enemy.root);
     this.hitbox.register(enemy);
     if (this.boardsRef !== null) this.boardsRef.register(enemy);
     this.enemies.push(enemy);
     return enemy;
+  }
+
+  /**
+   * Phase 5: adopt the scripted boss (BossVael constructs itself — it is
+   * content, not an enemies.json kind) into the ordinary lifecycle: scene,
+   * hitbox slot, status board, the enemies array (so TargetLock can lock it),
+   * §9's cap, hitstop gating and despawn hysteresis all apply unchanged. The
+   * boss is exempt from purgeDead and never self-respawns; reset() revives it
+   * with everything else. Returns false when the cap leaves no room.
+   */
+  spawnBoss(boss: EnemyBase): boolean {
+    this.purgeDead();
+    if (this.enemies.length >= EnemyManager.MAX_ENEMIES) return false;
+    this.scene.add(boss.root);
+    this.hitbox.register(boss);
+    if (this.boardsRef !== null) this.boardsRef.register(boss);
+    this.enemies.push(boss);
+    this.bossExempt = boss;
+    return true;
+  }
+
+  /**
+   * Phase 5: THE shared enemy projectile slab (contract: one pool for the
+   * whole bestiary, §13). Lazily built; spawnDef and the boss wiring both
+   * draw from here so a second slab can never exist.
+   */
+  sharedProjectiles(): EnemyProjectiles {
+    if (this.projectiles === null) {
+      this.projectiles = new EnemyProjectiles({
+        scene: this.scene,
+        hitbox: this.hitbox,
+        damage: this.damage,
+        field: this.field,
+      });
+    }
+    return this.projectiles;
   }
 
   get aliveCount(): number {
@@ -377,6 +379,7 @@ export class EnemyManager implements System {
       enemy.dispose();
     }
     enemies.length = 0;
+    this.bossExempt = null;
     if (this.projectiles !== null) {
       this.projectiles.dispose();
       this.projectiles = null;

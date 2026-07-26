@@ -275,27 +275,50 @@ export class BiomeTable {
    *
    * Two wobble fields, not one per border: `wobX` (varies mostly along z)
    * bends the east/west borders, `wobZ` (varies mostly along x) bends the
-   * south/north ones, and their mean bends the disc. Four `valueNoise` calls
-   * total on the mesher's hottest path, against ten for per-border fields.
+   * south/north ones, and their mean bends the disc.
+   *
+   * The wobbles are computed ONLY when a mask is inside its uncertain strip:
+   * |wob| <= WOBBLE, so any coordinate more than WOBBLE outside its band
+   * saturates the smoothstep to exactly 0 or 1 no matter what the noise says,
+   * and substituting 0 for the unevaluated wobble provably returns the same
+   * value. Region interiors — almost every sample the mesher takes — therefore
+   * cost zero noise calls, cheaper than Phase 2's two; only the ~54 u border
+   * strips pay for up to four.
    */
   sample(x: number, z: number, out: BiomeSample): BiomeSample {
     const seed = this.seed;
+    const radius = Math.sqrt(x * x + z * z);
+    const needDisc = radius > DISC_IN - WOBBLE && radius < DISC_OUT + WOBBLE;
+    const needZ =
+      needDisc ||
+      (-z > WHISPER_IN - WOBBLE && -z < WHISPER_OUT + WOBBLE) ||
+      (z > SPIRE_IN - WOBBLE && z < SPIRE_OUT + WOBBLE);
+    const needX =
+      needDisc ||
+      (x > FLANK_IN - WOBBLE && x < FLANK_OUT + WOBBLE) ||
+      (-x > FLANK_IN - WOBBLE && -x < FLANK_OUT + WOBBLE);
+
     const wl = WOBBLE_WAVELENGTH;
-    const wobX =
-      ((valueNoise(x / (wl * 3), z / wl, seed + 11) * 2 - 1) * 0.7 +
-        (valueNoise(x / wl, z / (wl * 0.38), seed + 23) * 2 - 1) * 0.3) *
-      WOBBLE;
-    const wobZ =
-      ((valueNoise(x / wl, z / (wl * 3), seed + 37) * 2 - 1) * 0.7 +
-        (valueNoise(x / (wl * 0.38), z / wl, seed + 41) * 2 - 1) * 0.3) *
-      WOBBLE;
+    let wobX = 0;
+    let wobZ = 0;
+    if (needX) {
+      wobX =
+        ((valueNoise(x / (wl * 3), z / wl, seed + 11) * 2 - 1) * 0.7 +
+          (valueNoise(x / wl, z / (wl * 0.38), seed + 23) * 2 - 1) * 0.3) *
+        WOBBLE;
+    }
+    if (needZ) {
+      wobZ =
+        ((valueNoise(x / wl, z / (wl * 3), seed + 37) * 2 - 1) * 0.7 +
+          (valueNoise(x / (wl * 0.38), z / wl, seed + 41) * 2 - 1) * 0.3) *
+        WOBBLE;
+    }
 
     // Priority chain: Whisperwood claims the south outright (it may carve the
     // disc's southern cap), then the disc protects Verdant from the other
     // three, then the Spire outranks the flanks in the far north. Every weight
     // is a product of masks, so the five always sum to exactly 1.
     const whisper = smoothstep(WHISPER_IN, WHISPER_OUT, -z + wobZ);
-    const radius = Math.sqrt(x * x + z * z);
     const open = smoothstep(DISC_IN, DISC_OUT, radius + (wobX + wobZ) * 0.5);
     const spireMask = smoothstep(SPIRE_IN, SPIRE_OUT, z + wobZ);
     const emberMask = smoothstep(FLANK_IN, FLANK_OUT, x + wobX);

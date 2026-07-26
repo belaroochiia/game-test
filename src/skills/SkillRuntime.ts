@@ -8,6 +8,7 @@ import type { System } from '../core/Engine';
 import type { EventBus } from '../core/EventBus';
 import { ObjectPool } from '../core/ObjectPool';
 import { EnemyBase } from '../enemy/EnemyBase';
+import { ArchetypeEnemy } from '../enemy/ArchetypeEnemy';
 import { PLAYER_STATE } from '../player/PlayerController';
 import type { PlayerController } from '../player/PlayerController';
 import type { PlayerStats } from '../player/PlayerStats';
@@ -688,6 +689,12 @@ export class SkillRuntime implements System {
     const heavy = shot.heavy || status.lastReactionHeavy;
     let armor = target instanceof EnemyBase ? target.def.armor : 0;
     if (armor > 0 && status.armorBroken(target)) armor *= 0.5;
+    // §9's elementMultiplier goes live in Phase 5: resonance × the target's
+    // resist/weak table from enemies.json (×0.5 / ×1.5 / 1).
+    let elementMult = shot.elementMult;
+    if (target instanceof ArchetypeEnemy) {
+      elementMult *= target.elementMultiplierFor(shot.element);
+    }
     const tp = target.position;
     this.damage.deal(
       target,
@@ -701,7 +708,7 @@ export class SkillRuntime implements System {
       tp.x,
       tp.y + target.height * HIT_HEIGHT,
       tp.z,
-      shot.elementMult,
+      elementMult,
       reactionMult,
     );
     if (shot.statusId >= 0) {

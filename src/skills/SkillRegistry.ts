@@ -236,7 +236,23 @@ const SKILL_KEYS: readonly string[] = [
   'delivery', 'damage', 'heal', 'status', 'heavy',
   'vfx', 'vfxColor', 'vfxSize', 'sfx',
   'masteryCurve', 'masteryBonus', 'fusionTags', 'dropWeight', 'loreText',
+  'shrineElement', 'fragments', 'bossReward',
 ];
+
+/** §8.2.3: fragment skills always assemble from exactly 3 pieces — the schema
+ * takes a count (not a boolean) so the rule reads at the data site, but any
+ * value other than 3 is a defect, loudly. */
+const FRAGMENT_PIECES = 3;
+
+function reqFragments(file: string, owner: string, value: unknown): number {
+  if (value === FRAGMENT_PIECES) return value;
+  fail(file, owner, 'fragments', `must be exactly ${FRAGMENT_PIECES} (§8.2.3: fragment skills always assemble from ${FRAGMENT_PIECES} pieces) — omit the field for non-fragment skills`, value);
+}
+
+function reqBossReward(file: string, owner: string, value: unknown): boolean {
+  if (value === true) return value;
+  fail(file, owner, 'bossReward', 'must be true when present — omit the field entirely for non-boss skills', value);
+}
 
 function freezeDef(def: SkillDef): SkillDef {
   Object.freeze(def.delivery);
@@ -294,7 +310,22 @@ function validateSkill(entry: unknown, index: number, byId: ReadonlyMap<string, 
     fusionTags: reqTags(FILE, owner, entry['fusionTags']),
     dropWeight: reqNumber(FILE, owner, 'dropWeight', entry['dropWeight'], 0, 1000, false),
     loreText: reqString(FILE, owner, 'loreText', entry['loreText'], false),
+    // §8.2's scripted acquisition markers (Phase 5) — see SkillTypes for the rules.
+    shrineElement:
+      entry['shrineElement'] === undefined
+        ? undefined
+        : reqOneOf(FILE, owner, 'shrineElement', entry['shrineElement'], ELEMENTS),
+    fragments: entry['fragments'] === undefined ? undefined : reqFragments(FILE, owner, entry['fragments']),
+    bossReward: entry['bossReward'] === undefined ? undefined : reqBossReward(FILE, owner, entry['bossReward']),
   };
+  // A scripted skill that also dropped from soul orbs would let RNG pre-empt
+  // its scripted moment (§8.2's five paths are distinct on purpose) — refused.
+  if (
+    (def.shrineElement !== undefined || def.fragments !== undefined || def.bossReward === true) &&
+    def.dropWeight !== 0
+  ) {
+    fail(FILE, owner, 'dropWeight', 'must be 0 on scripted-acquisition skills (shrineElement / fragments / bossReward): §8.2 shrine, fragment and boss skills never roll from soul orbs', def.dropWeight);
+  }
   return freezeDef(def);
 }
 
@@ -312,9 +343,27 @@ export class SkillRegistry {
     }
     const byId = new Map<string, SkillDef>();
     const list: SkillDef[] = [];
+    // Cross-entry rules for §8.2's scripted markers: one shrine skill per
+    // element, at most one boss Legendary in the whole book. Checked here
+    // (not per entry) because both are claims about the file, not a field.
+    const shrineOwner = new Map<string, string>();
+    let bossOwner: string | null = null;
     for (let i = 0; i < raw.length; i++) {
       const entry: unknown = raw[i];
       const def = validateSkill(entry, i, byId);
+      if (def.shrineElement !== undefined) {
+        const prev = shrineOwner.get(def.shrineElement);
+        if (prev !== undefined) {
+          fail(FILE, `skill "${def.id}"`, 'shrineElement', `duplicates skill "${prev}" — §8.2.2 has exactly ONE shrine skill per element`, def.shrineElement);
+        }
+        shrineOwner.set(def.shrineElement, def.id);
+      }
+      if (def.bossReward === true) {
+        if (bossOwner !== null) {
+          fail(FILE, `skill "${def.id}"`, 'bossReward', `duplicates skill "${bossOwner}" — §8.2.4 has exactly ONE scripted boss Legendary`, true);
+        }
+        bossOwner = def.id;
+      }
       byId.set(def.id, def);
       list.push(def);
     }

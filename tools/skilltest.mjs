@@ -1259,14 +1259,22 @@ const BRAWL4 = (o) => {
     let slot = 0;
     const started = performance.now();
     let last = started;
+    // Kite while fighting, like a real player: the Phase 5 bestiary staggers a
+    // stationary caster into 'busy' refusals, and a probe that measures an
+    // idle scene undercounts the very VFX load it exists to measure.
+    d.setInput({ moveX: 0.35, moveY: -0.45, sprint: false });
     const tick = () => {
       const now = performance.now();
       if (now - lastCast >= o.castCadenceMs) {
-        if (d.castSlot(slot)) castsAccepted++;
-        slot = (slot + 1) % 4;
-        lastCast = now;
+        // Try every frame once due; advance the slot only when a cast lands, so
+        // one busy moment does not silently skip a whole skill's turn.
+        if (d.castSlot(slot)) {
+          castsAccepted++;
+          slot = (slot + 1) % 4;
+          lastCast = now;
+        }
       }
-      if (now - lastAttack >= 400) {
+      if (now - lastAttack >= 900) {
         d.press('attack');
         lastAttack = now;
       }
@@ -2388,7 +2396,11 @@ async function main() {
         { x: 0, z: 0, ids: starterIds },
       );
       await sleep(300);
-      await page.evaluate(() => globalThis.__ARCANUM_DEBUG__.spawnSlimes(0, 0, 4, 2.5));
+      // Radius 6, not 2.5: the Phase 5 bestiary's blob lunges harder than the
+      // retired Phase 3 class, and four of them point-blank stagger-lock the
+      // player into 'busy' refusals — the budget probe then measures an idle
+      // scene. At 6 u they converge within a second but casts get out first.
+      await page.evaluate(() => globalThis.__ARCANUM_DEBUG__.spawnSlimes(0, 0, 4, 6));
       // The whole run drained mana; a brawl that cannot afford its casts would
       // measure an idle scene. Regen is ~4/s — wait for a real war chest.
       await page

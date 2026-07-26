@@ -41,7 +41,9 @@ import { HitboxSystem } from './combat/HitboxSystem';
 import type { HitQuery } from './combat/HitboxSystem';
 import { DamageSystem, setSeed as setDamageSeed } from './combat/DamageSystem';
 import { TargetLock } from './combat/TargetLock';
+import enemiesJson from './data/enemies.json';
 import { EnemyBase } from './enemy/EnemyBase';
+import { EnemyDefs } from './enemy/EnemyDefs';
 import { EnemyManager } from './enemy/EnemyManager';
 import { DamageNumbers } from './ui/DamageNumbers';
 
@@ -490,6 +492,7 @@ function main(): void {
   };
   hitbox.register(playerCombatant);
 
+  const enemyDefs = new EnemyDefs(enemiesJson);
   const enemies = new EnemyManager({
     scene: engine.scene,
     field,
@@ -498,9 +501,10 @@ function main(): void {
     damage,
     hitstop,
   });
-  // A small camp east of spawn: far enough that nothing aggros at boot (radius
-  // 11), close enough that the first fight is under twenty seconds away.
-  enemies.spawnSlimes(14, -6, 3, 3.5);
+  // Charge attacks stop at props; the bestiary needs the world's colliders.
+  enemies.propsRef = props;
+  // Population belongs to the SpawnDirector now (§9); no fixed camp. The debug
+  // ring spawner below keeps the older gates' vocabulary alive, data-driven.
 
   enemies.freezeRef = {
     isFrozen: (c) => {
@@ -897,7 +901,20 @@ function main(): void {
       setDamageSeed(n);
     },
     spawnSlimes: (x: number, z: number, count: number, radius: number) => {
-      enemies.spawnSlimes(x, z, count, radius);
+      // Kept for the Phase 3/4 gates. Spawns the cheapest Verdant-valid def —
+      // for the shipped data that is the baseline blob, with no kind in code.
+      let cheapest: (typeof enemyDefs.all)[number] | undefined;
+      const all = enemyDefs.all;
+      for (let i = 0; i < all.length; i++) {
+        const def = all[i];
+        if (def === undefined || def.biomes.indexOf(0) < 0) continue;
+        if (cheapest === undefined || def.budgetCost < cheapest.budgetCost) cheapest = def;
+      }
+      if (cheapest === undefined) return;
+      for (let i = 0; i < count; i++) {
+        const angle = count > 0 ? (i / count) * Math.PI * 2 : 0;
+        enemies.spawnDef(cheapest, x + Math.sin(angle) * radius, z + Math.cos(angle) * radius, false);
+      }
     },
     killAllEnemies: () => {
       enemies.killAll();

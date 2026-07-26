@@ -146,6 +146,19 @@ export interface SkillDef {
   /** Soul-orb weighting; 0 = never drops (fusion-only results). */
   readonly dropWeight: number;
   readonly loreText: string;
+  /**
+   * §8.2's scripted acquisition markers (Phase 5). All three are optional and
+   * mutually independent; ordinary orb-drop skills carry none of them. The
+   * registry validates them loudly: `shrineElement` must be a valid element and
+   * is UNIQUE across the whole book (§8.2.2 — one guaranteed Epic per shrine),
+   * `fragments` must be exactly 3 when present (§8.2.3 — three pieces always),
+   * `bossReward` may be carried by at most ONE skill (§8.2.4 — the scripted
+   * boss Legendary). Any of the three forces dropWeight 0, so soul-orb RNG can
+   * never pre-empt a scripted moment.
+   */
+  readonly shrineElement?: ElementId;
+  readonly fragments?: number;
+  readonly bossReward?: boolean;
 }
 
 /** One fusions.json entry, by skill id. Order-insensitive: (a,b) ≡ (b,a). */

@@ -1320,6 +1320,14 @@ async function main() {
       if (root !== null) root.style.visibility = 'hidden';
     });
 
+    // A wandering enemy in frame varies the non-terrain draw count between
+    // keyframe snapshots and fails the dome-constancy check spuriously (found
+    // via GL-level draw capture). The check is about the DOME; clear the cast.
+    await page.evaluate(() => {
+      const d = globalThis.__ARCANUM_DEBUG__;
+      if (typeof d.killAllEnemies === 'function') d.killAllEnemies();
+    });
+
     const dayRows = [];
     let bandsWorked = true;
     for (const phase of DAY_PHASES) {

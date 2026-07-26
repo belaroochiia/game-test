@@ -33,7 +33,7 @@ const RESONANCE_ELEMENT_MULT = 1.15;
 const VERSATILE_MIN_DISTINCT = 4;
 const VERSATILE_STATUS_BONUS = 0.2;
 
-export type LearnSource = 'orb' | 'fusion' | 'debug';
+export type LearnSource = 'orb' | 'fusion' | 'shrine' | 'fragment' | 'boss' | 'debug';
 
 /**
  * Payload of 'grimoire:acquired'. The GameEventMap key is declared in
@@ -108,6 +108,8 @@ export class Grimoire {
   private readonly knownSet = new Set<string>();
   /** Event-frequency bookkeeping only (see header) — never in the tick path. */
   private readonly masteryMap = new Map<string, MasteryRecord>();
+  /** §8.2.3 Grimoire Fragment tallies (pickup frequency — never per tick). */
+  private readonly fragmentMap = new Map<string, number>();
   private readonly slots: Array<string | null> = new Array<string | null>(ACTIVE_SLOTS).fill(null);
 
   /** Cached resonance, recomputed on equip change — not per query (§3). */
@@ -168,6 +170,28 @@ export class Grimoire {
     event.source = source;
     this.bus.emit('grimoire:acquired', event);
     return true;
+  }
+
+  /**
+   * §8.2.3: one collected Grimoire Fragment. Returns the new count; the CALLER
+   * (Fragments) decides when the set is complete and calls learn(id,
+   * 'fragment') — Grimoire does not know how many pieces a skill needs (that
+   * lives in skills.json, read by the fragment sites). Unknown ids warn and
+   * count nothing, mirroring learn()'s loudness.
+   */
+  addFragment(id: string): number {
+    if (this.registry.get(id) === undefined) {
+      console.warn('Grimoire: addFragment() of unknown skill id', id);
+      return 0;
+    }
+    const next = (this.fragmentMap.get(id) ?? 0) + 1;
+    this.fragmentMap.set(id, next);
+    return next;
+  }
+
+  /** Pieces held for a skill (0 when none). GrimoireScreen's card badge reads this. */
+  fragmentCount(id: string): number {
+    return this.fragmentMap.get(id) ?? 0;
   }
 
   get knownCount(): number {
@@ -329,6 +353,7 @@ export class Grimoire {
   private applyStartingState(): void {
     this.knownSet.clear();
     this.masteryMap.clear();
+    this.fragmentMap.clear();
     for (let s = 0; s < ACTIVE_SLOTS; s++) this.slots[s] = null;
     const start = this.startingLoadout;
     for (let i = 0; i < start.length; i++) {
