@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 import type { System } from '../core/Engine';
-import type { TerrainGen } from '../world/TerrainGen';
+import type { HeightSampler } from '../world/HeightField';
 import type { AABB, SpatialHash } from '../world/SpatialHash';
 import type { InputState } from './InputState';
 import { consumeBuffered } from './InputState';
@@ -35,7 +35,7 @@ export const PLAYER_STATE = {
 export type PlayerState = (typeof PLAYER_STATE)[keyof typeof PLAYER_STATE];
 
 export interface PlayerControllerOptions {
-  terrain: TerrainGen;
+  terrain: HeightSampler;
   props: SpatialHash;
   input: InputState;
   stats: PlayerStats;
@@ -86,7 +86,7 @@ export class PlayerController implements System {
   /** Set by the bootstrap from CameraRig each tick; movement is camera-relative (§6). */
   cameraYaw = 0;
 
-  private readonly terrain: TerrainGen;
+  private readonly terrain: HeightSampler;
   private readonly props: SpatialHash;
   private readonly input: InputState;
   private readonly stats: PlayerStats;

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 import type { System } from '../core/Engine';
-import type { TerrainGen } from '../world/TerrainGen';
+import type { HeightSampler } from '../world/HeightField';
 import type { AABB, SpatialHash } from '../world/SpatialHash';
 import type { InputState } from './InputState';
 import type { PlayerController } from './PlayerController';
@@ -22,7 +22,7 @@ import { PLAYER_STATE } from './PlayerController';
 export interface CameraRigOptions {
   camera: THREE.PerspectiveCamera;
   target: PlayerController;
-  terrain: TerrainGen;
+  terrain: HeightSampler;
   props: SpatialHash;
   input: InputState;
   sensitivity?: number;
@@ -64,7 +64,7 @@ export class CameraRig implements System {
 
   private readonly camera: THREE.PerspectiveCamera;
   private readonly target: PlayerController;
-  private readonly terrain: TerrainGen;
+  private readonly terrain: HeightSampler;
   private readonly props: SpatialHash;
   private readonly input: InputState;
 
