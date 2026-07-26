@@ -1,25 +1,41 @@
 import * as THREE from 'three';
 
 /**
- * §5's region table, cut down to the two regions Phase 2 ships: Verdant Hollow
- * (the spawn side — soft green, golden yellow) and Whisperwood (dark green,
- * teal, blue mist).
+ * §5's full region table, Phase 5: Verdant Hollow (centre), Whisperwood
+ * (south), Emberscar (east), Frostvale (west) and The Hollow Spire (far
+ * north).
  *
- * The boundary is a *field*, not a line: a broad spatial gradient plus
- * low-frequency noise, resolved through a ~30-unit smoothstep band. §12 fails
- * the phase for obvious popping and a hard colour seam is popping, so nothing
- * here ever makes a discrete decision about which biome a point belongs to
- * except `dominant`, which only prop selection and other yes/no calls use.
+ * Every boundary is a *field*, not a line: a spatial gradient resolved through
+ * a ~30-unit smoothstep band, wobbled by low-frequency noise so borders wander
+ * organically. §12 fails the phase for obvious popping and a hard colour seam
+ * is popping, so nothing here ever makes a discrete decision about which biome
+ * a point belongs to except `dominant`, which only prop selection and other
+ * yes/no calls use.
+ *
+ * The layout (a Phase 5 contract decision, not up for local re-litigating):
+ * Verdant Hollow is a disc of radius ~110 around the origin; Whisperwood is
+ * everything south of z ~ -60 — it carves into the disc's southern cap, which
+ * keeps Phase 2's device-verified southern traverse (spawn -> forest inside
+ * 125 u) intact; Emberscar is the east beyond x ~ +70, Frostvale the mirror
+ * west, and the Spire owns the far north beyond z ~ +120, taking priority over
+ * east and west in the corners. Weights come from a priority chain of masks,
+ * so they sum to exactly 1 with no normalisation divide.
  *
  * The value-noise primitives live in this module rather than a third one:
- * Phase 2's file list is fixed, and `HeightField -> BiomeTable` is the only
+ * the world file list is fixed, and `HeightField -> BiomeTable` is the only
  * dependency direction between the two, so exporting them here cannot create a
  * cycle.
  */
 
-export const BIOME = { VerdantHollow: 0, Whisperwood: 1 } as const;
+export const BIOME = {
+  VerdantHollow: 0,
+  Whisperwood: 1,
+  Emberscar: 2,
+  Frostvale: 3,
+  HollowSpire: 4,
+} as const;
 export type BiomeId = (typeof BIOME)[keyof typeof BIOME];
-export const BIOME_COUNT = 2;
+export const BIOME_COUNT = 5;
 
 /** Reusable blend result — never allocate one per sample. */
 export interface BiomeSample {
@@ -41,13 +57,22 @@ export interface BiomeDef {
   /** Terrain shaping. */
   readonly amplitude: number; // metres of relief
   readonly wavelength: number; // feature size in world units
-  readonly ridged: boolean; // ridged noise reads as forested hills
+  readonly ridged: boolean; // ridged noise reads as harsh, creased relief
   /** Vertex colour ramp, low -> high, plus the rock colour for steep faces. */
   readonly colorLow: number;
   readonly colorMid: number;
   readonly colorHigh: number;
   readonly colorRock: number;
-  /** Fog tint contribution, blended by weight (§5's "blue mist"). */
+  /**
+   * Below-sea hollows, §5's fake-glow doctrine: Emberscar's sunken basins are
+   * vertex-coloured glowing orange (lava), Frostvale's ice-white (frozen
+   * lakes). `hollowGlow` scales the packed linear colour — > 1 reads as
+   * emissive under any light — and 0 disables the feature for the biome.
+   * The single global Water plane is untouched; this is colour only.
+   */
+  readonly hollowColor: number;
+  readonly hollowGlow: number;
+  /** Fog tint contribution, blended by weight (§5's per-region atmosphere). */
   readonly fogColor: number;
   /** Instances per chunk, indexed by PropScatter's PROP_TYPE: tree, rock, bush, mushroom. */
   readonly propDensity: readonly number[];
@@ -94,29 +119,32 @@ export function valueNoise(x: number, z: number, seed: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Boundary shape
+// Region layout (see the module comment; values are the contract's)
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SEED = 1337;
 
+/** Verdant Hollow disc: full weight inside 95, gone by 125 (a 30 u band at r ~ 110). */
+const DISC_IN = 95;
+const DISC_OUT = 125;
+/** Whisperwood south of z ~ -60: mask over -z in 45..75. */
+const WHISPER_IN = 45;
+const WHISPER_OUT = 75;
+/** Emberscar east / Frostvale west of |x| ~ 70: mask over +/-x in 55..85. */
+const FLANK_IN = 55;
+const FLANK_OUT = 85;
+/** The Hollow Spire north of z ~ +120: mask over z in 105..135. */
+const SPIRE_IN = 105;
+const SPIRE_OUT = 135;
+
 /**
- * Mean world Z of the boundary. Negative Z is straight ahead of a freshly spawned
- * player (§7: facing 0 points down -Z), so walking forward from spawn is the
- * traverse that crosses regions — after ~40 units of Verdant Hollow, which keeps
- * the opening minutes in the safe region §5 asks for.
+ * How far borders meander. 12, down from Phase 2's 18: with four borders and a
+ * disc the wobbles can stack across a corner, and 12 keeps the worst measured
+ * weight gradient in the same ~0.05/u class the 30 u band promises.
  */
-const BOUNDARY_Z = -55;
-/** Half-width of the transition band: 30 units end to end, as the phase requires. */
-const BAND_HALF = 15;
-/** How far the boundary meanders, so it reads as a treeline rather than a ruler. */
-const WOBBLE = 18;
+const WOBBLE = 12;
 /** Two octaves only. The band is 30 units wide; anything finer than this just aliases. */
 const WOBBLE_WAVELENGTH = 150;
-/**
- * Slight westward tilt. Purely so the boundary is not perfectly axis-aligned —
- * an east-west line across a 600-unit map is a very readable artefact.
- */
-const BOUNDARY_TILT = 0.18;
 
 const VERDANT_HOLLOW: BiomeDef = {
   id: BIOME.VerdantHollow,
@@ -129,6 +157,8 @@ const VERDANT_HOLLOW: BiomeDef = {
   colorMid: 0x6f9a44,
   colorHigh: 0xc9b45c, // §5's golden yellow, on the hilltops
   colorRock: 0x8a8a83,
+  hollowColor: 0x000000,
+  hollowGlow: 0,
   fogColor: 0xa9c68d,
   propDensity: [5, 4, 4, 0], // open hill meadow: few trees, no mushrooms
 };
@@ -144,6 +174,8 @@ const WHISPERWOOD: BiomeDef = {
   colorMid: 0x265741,
   colorHigh: 0x46836b, // §5's teal
   colorRock: 0x55636e,
+  hollowColor: 0x000000,
+  hollowGlow: 0,
   fogColor: 0x3f6f7d, // §5's blue mist
   /*
    * 15 trees, not 10: a third of Whisperwood's tree candidates are rejected for
@@ -155,22 +187,74 @@ const WHISPERWOOD: BiomeDef = {
   propDensity: [15, 2, 3, 6], // dense trees, glowing mushrooms
 };
 
+const EMBERSCAR: BiomeDef = {
+  id: BIOME.Emberscar,
+  name: 'Emberscar',
+  // Ridged and harsh (§5's volcanic mountains), the steepest walkable region.
+  amplitude: 12,
+  wavelength: 36,
+  ridged: true,
+  colorLow: 0x4a3227, // ash-brown basins
+  colorMid: 0x8f4a2b, // §5's brick red
+  colorHigh: 0xd06a2e, // orange on the crests
+  colorRock: 0x57453c, // basalt
+  hollowColor: 0xff7a1c, // sunken basins glow as lava (vertex colour only)
+  hollowGlow: 1.9,
+  fogColor: 0xb0713f, // hot ash haze
+  propDensity: [1, 9, 0, 2], // scorched near-treeless rubble field; ember vents
+};
+
+const FROSTVALE: BiomeDef = {
+  id: BIOME.Frostvale,
+  name: 'Frostvale',
+  // Rolling: lower and broader than everything east of it (§5's snow valley).
+  amplitude: 7,
+  wavelength: 52,
+  ridged: false,
+  colorLow: 0x8fb3c4, // shadowed ice-blue hollows
+  colorMid: 0xdde9ee, // snow
+  colorHigh: 0xf7fbfd, // bright drifts
+  colorRock: 0x6f87a0,
+  hollowColor: 0xe4f6ff, // sunken basins read as frozen lakes
+  hollowGlow: 1.15,
+  fogColor: 0xc7dbe8, // §5's pale cyan
+  propDensity: [6, 5, 2, 0], // snowy pines and rubble, nothing lush
+};
+
+const HOLLOW_SPIRE: BiomeDef = {
+  id: BIOME.HollowSpire,
+  name: 'The Hollow Spire',
+  // Jagged: the tallest amplitude on the shortest wavelength that stays above
+  // LOD1's Nyquist limit (32 / 4 = 8 u >= 3.125 u).
+  amplitude: 14,
+  wavelength: 32,
+  ridged: true,
+  colorLow: 0x221735, // void
+  colorMid: 0x3f2b63, // §5's dark purple
+  colorHigh: 0x8b3f9e, // magenta on the spikes
+  colorRock: 0x352c47,
+  hollowColor: 0x000000,
+  hollowGlow: 0,
+  fogColor: 0x4d3d6b, // violet murk
+  propDensity: [0, 7, 0, 5], // shattered rubble + void shards (tinted mushrooms)
+};
+
 /** sRGB -> linear happens once, here, not per sample. */
 const hexToLinear = new THREE.Color();
 
 export class BiomeTable {
   private readonly seed: number;
-  private readonly defs: readonly [BiomeDef, BiomeDef];
+  private readonly defs: readonly [BiomeDef, BiomeDef, BiomeDef, BiomeDef, BiomeDef];
   /** Linear fog RGB per biome, 3 floats each. */
   private readonly fogLinear: Float32Array;
 
   constructor(seed: number = DEFAULT_SEED) {
     this.seed = Math.floor(seed);
-    this.defs = [VERDANT_HOLLOW, WHISPERWOOD];
+    this.defs = [VERDANT_HOLLOW, WHISPERWOOD, EMBERSCAR, FROSTVALE, HOLLOW_SPIRE];
 
     this.fogLinear = new Float32Array(BIOME_COUNT * 3);
     for (let i = 0; i < BIOME_COUNT; i++) {
-      const def = i === BIOME.Whisperwood ? this.defs[1] : this.defs[0];
+      const def = this.get(i as BiomeId);
       hexToLinear.setHex(def.fogColor);
       this.fogLinear[i * 3] = hexToLinear.r;
       this.fogLinear[i * 3 + 1] = hexToLinear.g;
@@ -181,29 +265,65 @@ export class BiomeTable {
   get(id: BiomeId): BiomeDef {
     // Indexed off a tuple rather than an array, so the return type is not
     // `BiomeDef | undefined` under noUncheckedIndexedAccess.
-    return id === BIOME.Whisperwood ? this.defs[1] : this.defs[0];
+    return this.defs[id];
   }
 
   /**
    * Smooth blend at (x, z), written into `out`. Allocation-free and a pure
    * function of world (x, z) — neighbouring chunks therefore agree exactly on
    * their shared edge with no stitching.
+   *
+   * Two wobble fields, not one per border: `wobX` (varies mostly along z)
+   * bends the east/west borders, `wobZ` (varies mostly along x) bends the
+   * south/north ones, and their mean bends the disc. Four `valueNoise` calls
+   * total on the mesher's hottest path, against ten for per-border fields.
    */
   sample(x: number, z: number, out: BiomeSample): BiomeSample {
     const seed = this.seed;
-    // Mostly a function of x, so the boundary meanders along its own length
-    // instead of folding back on itself.
-    const wobble =
-      (valueNoise(x / WOBBLE_WAVELENGTH, z / (WOBBLE_WAVELENGTH * 3), seed + 11) * 2 - 1) * 0.7 +
-      (valueNoise(x / (WOBBLE_WAVELENGTH * 0.38), z / WOBBLE_WAVELENGTH, seed + 23) * 2 - 1) * 0.3;
+    const wl = WOBBLE_WAVELENGTH;
+    const wobX =
+      ((valueNoise(x / (wl * 3), z / wl, seed + 11) * 2 - 1) * 0.7 +
+        (valueNoise(x / wl, z / (wl * 0.38), seed + 23) * 2 - 1) * 0.3) *
+      WOBBLE;
+    const wobZ =
+      ((valueNoise(x / wl, z / (wl * 3), seed + 37) * 2 - 1) * 0.7 +
+        (valueNoise(x / (wl * 0.38), z / wl, seed + 41) * 2 - 1) * 0.3) *
+      WOBBLE;
 
-    const distance = BOUNDARY_Z - z - x * BOUNDARY_TILT + wobble * WOBBLE;
-    const whisper = smoothstep(-BAND_HALF, BAND_HALF, distance);
+    // Priority chain: Whisperwood claims the south outright (it may carve the
+    // disc's southern cap), then the disc protects Verdant from the other
+    // three, then the Spire outranks the flanks in the far north. Every weight
+    // is a product of masks, so the five always sum to exactly 1.
+    const whisper = smoothstep(WHISPER_IN, WHISPER_OUT, -z + wobZ);
+    const radius = Math.sqrt(x * x + z * z);
+    const open = smoothstep(DISC_IN, DISC_OUT, radius + (wobX + wobZ) * 0.5);
+    const spireMask = smoothstep(SPIRE_IN, SPIRE_OUT, z + wobZ);
+    const emberMask = smoothstep(FLANK_IN, FLANK_OUT, x + wobX);
+    const frostMask = smoothstep(FLANK_IN, FLANK_OUT, -x + wobX);
+
+    const north = (1 - whisper) * open;
+    const spire = north * spireMask;
+    const flank = north - spire;
+    const ember = flank * emberMask;
+    const frost = flank * (1 - emberMask) * frostMask;
 
     const weights = out.weights;
-    weights[BIOME.VerdantHollow] = 1 - whisper;
     weights[BIOME.Whisperwood] = whisper;
-    out.dominant = whisper > 0.5 ? BIOME.Whisperwood : BIOME.VerdantHollow;
+    weights[BIOME.HollowSpire] = spire;
+    weights[BIOME.Emberscar] = ember;
+    weights[BIOME.Frostvale] = frost;
+    weights[BIOME.VerdantHollow] = 1 - whisper - spire - ember - frost;
+
+    let dominant = 0;
+    let best = weights[0] ?? 0;
+    for (let i = 1; i < BIOME_COUNT; i++) {
+      const w = weights[i] ?? 0;
+      if (w > best) {
+        best = w;
+        dominant = i;
+      }
+    }
+    out.dominant = dominant as BiomeId;
     return out;
   }
 

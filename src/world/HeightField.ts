@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 import { BIOME_COUNT, BiomeTable, createBiomeSample, hash2, smoothstep, valueNoise } from './BiomeTable';
-import type { BiomeSample } from './BiomeTable';
+import type { BiomeId, BiomeSample } from './BiomeTable';
 
 /**
  * The single source of truth for world shape (§5's 600x600 map), deliberately
@@ -78,6 +78,22 @@ const RIDGE_WIDTH = 2.6;
 const RIDGE_LENGTH = 30;
 const RIDGE_HEIGHT = 5.4;
 
+/**
+ * §5 / Phase 5: the boss arena — a guaranteed gentle plateau at the Hollow
+ * Spire's heart. Terrain is blended to a constant height: dead flat inside
+ * SPIRE_PLATEAU_RADIUS, easing back into the Spire's jagged relief by
+ * PLATEAU_FADE. The 28 u skirt keeps the blend-in slopes of the same order as
+ * the region's own; the north side runs into the world-rim drop (applied
+ * after, so the rim always wins), which makes the approach a southern one —
+ * fitting for an endgame arena backed onto the void. Exported for PropScatter
+ * (keep-out) and the boss/arena owners, so the coordinate lives in one place.
+ */
+export const SPIRE_PLATEAU_X = 0;
+export const SPIRE_PLATEAU_Z = 255;
+export const SPIRE_PLATEAU_RADIUS = 18;
+const PLATEAU_FADE = 46;
+const PLATEAU_HEIGHT = 6;
+
 /** §5: the border is a cliff into fog, not an invisible wall. */
 const EDGE_MARGIN = 20;
 /** How far below sea level the rim settles — deep enough to read as a drop. */
@@ -96,8 +112,18 @@ const JITTER_SEED = 104729;
 const JITTER_BASE = 0.94;
 const JITTER_SPAN = 0.12;
 
-/** Palette slots per biome, in the order they are packed: low, mid, high, rock. */
-const PALETTE_SLOTS = 4;
+/** Palette slots per biome, in the order they are packed: low, mid, high, rock, hollow. */
+const PALETTE_SLOTS = 5;
+/**
+ * Below-sea hollow tint band (§5 fake glow, a Phase 5 contract decision):
+ * full lava/ice colour a little below the waterline, fading out just above it
+ * so the glow rims the shore and reads from dry land. Colour only — the
+ * global Water plane is untouched. Note the world-rim drop is below sea level
+ * everywhere, so in Emberscar the outer cliff glows too: the fog sea reads as
+ * a lava ocean there, which is §5's "sungai lava" for free.
+ */
+const HOLLOW_FULL = SEA_LEVEL - 1.2;
+const HOLLOW_FADE = SEA_LEVEL + 1.0;
 
 const hexToLinear = new THREE.Color();
 
@@ -127,6 +153,8 @@ export class HeightField implements HeightSampler {
   private readonly biomeRidged: Float32Array;
   /** Linear RGB, BIOME_COUNT * PALETTE_SLOTS * 3. */
   private readonly palette: Float32Array;
+  /** 1 where the biome tints its below-sea hollows (lava/ice), else 0. */
+  private readonly biomeHollowMix: Float32Array;
 
   /** Separate scratches: a caller may hold the result of biomeAt across a heightAt. */
   private readonly fieldSample: BiomeSample = createBiomeSample();
@@ -164,9 +192,10 @@ export class HeightField implements HeightSampler {
     this.biomeWavelength = new Float32Array(BIOME_COUNT);
     this.biomeRidged = new Float32Array(BIOME_COUNT);
     this.palette = new Float32Array(BIOME_COUNT * PALETTE_SLOTS * 3);
+    this.biomeHollowMix = new Float32Array(BIOME_COUNT);
 
     for (let i = 0; i < BIOME_COUNT; i++) {
-      const def = this.biomes.get(i as 0 | 1);
+      const def = this.biomes.get(i as BiomeId);
       this.biomeAmplitude[i] = def.amplitude;
       this.biomeWavelength[i] = def.wavelength;
       this.biomeRidged[i] = def.ridged ? 1 : 0;
@@ -174,6 +203,9 @@ export class HeightField implements HeightSampler {
       this.packColor(i, 1, def.colorMid);
       this.packColor(i, 2, def.colorHigh);
       this.packColor(i, 3, def.colorRock);
+      // Pre-multiplied by the glow, so > 1 linear values fake emissive lava.
+      this.packColor(i, 4, def.hollowColor, def.hollowGlow);
+      this.biomeHollowMix[i] = def.hollowGlow > 0 ? 1 : 0;
     }
   }
 
@@ -230,6 +262,16 @@ export class HeightField implements HeightSampler {
     const ridgeDx = (x - RIDGE_X) / RIDGE_WIDTH;
     const ridgeDz = (z - RIDGE_Z) / RIDGE_LENGTH;
     h += RIDGE_HEIGHT * Math.exp(-ridgeDx * ridgeDx - ridgeDz * ridgeDz);
+
+    // The boss arena: blend to a constant height at the Spire's heart — dead
+    // flat inside SPIRE_PLATEAU_RADIUS, jagged again by PLATEAU_FADE. Same
+    // pattern as the spawn disc, and just as pure in (x, z).
+    const px = x - SPIRE_PLATEAU_X;
+    const pz = z - SPIRE_PLATEAU_Z;
+    const plateauDist = Math.sqrt(px * px + pz * pz);
+    if (plateauDist < PLATEAU_FADE) {
+      h += (PLATEAU_HEIGHT - h) * (1 - smoothstep(SPIRE_PLATEAU_RADIUS, PLATEAU_FADE, plateauDist));
+    }
 
     // §5's border: a cliff into the fog sea. Chebyshev distance, so the drop runs
     // parallel to the map edges instead of forming a circular bowl.
@@ -309,6 +351,10 @@ export class HeightField implements HeightSampler {
     let rockR = 0;
     let rockG = 0;
     let rockB = 0;
+    let holR = 0;
+    let holG = 0;
+    let holB = 0;
+    let holW = 0;
     for (let i = 0; i < BIOME_COUNT; i++) {
       const w = weights[i] ?? 0;
       if (w <= 0) continue;
@@ -326,6 +372,10 @@ export class HeightField implements HeightSampler {
       rockR += (palette[base + 9] ?? 0) * w;
       rockG += (palette[base + 10] ?? 0) * w;
       rockB += (palette[base + 11] ?? 0) * w;
+      holR += (palette[base + 12] ?? 0) * w;
+      holG += (palette[base + 13] ?? 0) * w;
+      holB += (palette[base + 14] ?? 0) * w;
+      holW += (this.biomeHollowMix[i] ?? 0) * w;
     }
     if (amplitude < 1e-3) amplitude = 1;
 
@@ -347,6 +397,19 @@ export class HeightField implements HeightSampler {
     r += (rockR - r) * toRock;
     g += (rockG - g) * toRock;
     b += (rockB - b) * toRock;
+
+    // §5 lava / frozen lakes: below-sea hollows take the biome's hollow tint.
+    // holR is pre-multiplied by weight AND glow, holW is the weight of biomes
+    // that participate at all, so `r + t*(holR - holW*r)` is exactly a lerp of
+    // strength t*holW toward the weighted hollow colour — no divide needed.
+    if (holW > 0) {
+      const toHollow = 1 - smoothstep(HOLLOW_FULL, HOLLOW_FADE, h);
+      if (toHollow > 0) {
+        r += (holR - holW * r) * toHollow;
+        g += (holG - holW * g) * toHollow;
+        b += (holB - holW * b) * toHollow;
+      }
+    }
 
     // Jitter keyed to the LOD0 grid cell, so it is a pure function of position and
     // cannot flicker as chunks stream in and out.
@@ -402,11 +465,11 @@ export class HeightField implements HeightSampler {
   }
 
   /** sRGB -> linear once per palette entry at construction, never per sample. */
-  private packColor(biome: number, slot: number, hex: number): void {
+  private packColor(biome: number, slot: number, hex: number, scale: number = 1): void {
     hexToLinear.setHex(hex);
     const base = (biome * PALETTE_SLOTS + slot) * 3;
-    this.palette[base] = hexToLinear.r;
-    this.palette[base + 1] = hexToLinear.g;
-    this.palette[base + 2] = hexToLinear.b;
+    this.palette[base] = hexToLinear.r * scale;
+    this.palette[base + 1] = hexToLinear.g * scale;
+    this.palette[base + 2] = hexToLinear.b * scale;
   }
 }

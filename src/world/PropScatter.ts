@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 
 import { BIOME_COUNT, createBiomeSample } from './BiomeTable';
-import type { BiomeSample, BiomeTable } from './BiomeTable';
-import { SEA_LEVEL } from './HeightField';
+import type { BiomeId, BiomeSample, BiomeTable } from './BiomeTable';
+import { SEA_LEVEL, SPIRE_PLATEAU_RADIUS, SPIRE_PLATEAU_X, SPIRE_PLATEAU_Z } from './HeightField';
 import type { HeightField } from './HeightField';
 import type { AABB, SpatialHash } from './SpatialHash';
 
@@ -38,7 +38,12 @@ import type { AABB, SpatialHash } from './SpatialHash';
  * between the two modules looks like.
  */
 
-/** Prop archetypes for the two Phase 2 biomes. Geometry is generated in code (§1). */
+/**
+ * Prop archetypes shared by all five regions — per-biome density and
+ * instanceColor tint are what make the same four meshes read as meadow,
+ * forest, cinder field, snowfield or void ruin. Geometry is generated in
+ * code (§1).
+ */
 export const PROP_TYPE = { Tree: 0, Rock: 1, Bush: 2, Mushroom: 3 } as const;
 export type PropTypeId = (typeof PROP_TYPE)[keyof typeof PROP_TYPE];
 export const PROP_TYPE_COUNT = 4;
@@ -65,6 +70,13 @@ const SCATTER_SALT = 0x5f3a91;
 
 /** Clear radius around the world origin per type. >= the 4 units the spawn area needs. */
 const SPAWN_CLEAR = new Float32Array([7, 4, 4, 4]);
+/**
+ * Keep-out around the boss arena at the Spire's heart (Phase 5 contract:
+ * nothing spawns inside the plateau's inner 18 u). +1 so a prop's own radius
+ * cannot overhang the line.
+ */
+const ARENA_CLEAR = SPIRE_PLATEAU_RADIUS + 1;
+const ARENA_CLEAR_SQ = ARENA_CLEAR * ARENA_CLEAR;
 const DEG = Math.PI / 180;
 /** Steepest ground each type will stand on. Trees get the ~30 deg limit; rubble tolerates more. */
 const MAX_SLOPE = new Float32Array([30 * DEG, 55 * DEG, 40 * DEG, 38 * DEG]);
@@ -113,20 +125,25 @@ const CH_VALUE = 7;
 
 /**
  * Per-type, per-biome colour multiplier applied through `instanceColor`, giving
- * §5's two regions their own foliage without a second material or a second mesh:
- * Verdant Hollow pulls the canopy golden, Whisperwood pulls it dark teal. These
- * are multipliers on the baked vertex colour, not colours, so they are written
- * raw — running them through THREE.Color would apply an sRGB decode to a ratio.
+ * §5's five regions their own props without a second material or a second
+ * mesh. Layout: [type][biome][rgb], biome order Verdant, Whisperwood,
+ * Emberscar, Frostvale, Hollow Spire. These are multipliers on the baked
+ * vertex colour, not colours, so they are written raw — running them through
+ * THREE.Color would apply an sRGB decode to a ratio. The same tree reads as
+ * golden meadow oak, teal forest pine, charred snag, snow-laden pine or dusk
+ * shade purely through this table; Spire mushrooms are pushed hot magenta
+ * (> 1 channels) so they read as glowing void shards — §5's fake-glow
+ * doctrine, zero extra materials.
  */
 const TINT = new Float32Array([
-  // Tree: golden green, then §5's dark green / teal
-  1.1, 1.04, 0.7, 0.55, 0.82, 0.86,
-  // Rock: warm grey, then cold blue-grey
-  1.02, 1.0, 0.92, 0.8, 0.9, 1.02,
+  // Tree
+  1.1, 1.04, 0.7,   0.55, 0.82, 0.86,   0.34, 0.28, 0.25,   1.28, 1.36, 1.5,   0.55, 0.4, 0.68,
+  // Rock
+  1.02, 1.0, 0.92,  0.8, 0.9, 1.02,     0.6, 0.4, 0.33,     1.12, 1.22, 1.34,  0.66, 0.52, 0.92,
   // Bush
-  1.08, 1.02, 0.66, 0.58, 0.86, 0.8,
-  // Mushroom: only really a Whisperwood prop, and there it reads cold and bright
-  1.0, 0.95, 0.9, 0.75, 1.05, 1.1,
+  1.08, 1.02, 0.66, 0.58, 0.86, 0.8,    0.5, 0.36, 0.28,    1.24, 1.3, 1.44,   0.6, 0.42, 0.75,
+  // Mushroom: Whisperwood cold-bright, Emberscar an ember vent, Spire a void shard
+  1.0, 0.95, 0.9,   0.75, 1.05, 1.1,    1.35, 0.62, 0.3,    0.95, 1.08, 1.22,  1.45, 0.6, 1.5,
 ]);
 
 const PROP_NAMES = ['tree', 'rock', 'bush', 'mushroom'];
@@ -358,7 +375,7 @@ export class PropScatter {
 
     this.density = new Float32Array(BIOME_COUNT * PROP_TYPE_COUNT);
     for (let b = 0; b < BIOME_COUNT; b++) {
-      const def = this.biomes.get(b as 0 | 1);
+      const def = this.biomes.get(b as BiomeId);
       for (let t = 0; t < PROP_TYPE_COUNT; t++) {
         const d = def.propDensity[t] ?? 0;
         this.density[b * PROP_TYPE_COUNT + t] = d;
@@ -617,6 +634,10 @@ export class PropScatter {
       if (!field.inBounds(x, z)) continue;
       // Keep the spawn area clear, or the player wakes up inside a tree.
       if (x * x + z * z < clearSq) continue;
+      // Keep the boss arena clear — the fight owns that ground.
+      const arenaDx = x - SPIRE_PLATEAU_X;
+      const arenaDz = z - SPIRE_PLATEAU_Z;
+      if (arenaDx * arenaDx + arenaDz * arenaDz < ARENA_CLEAR_SQ) continue;
 
       // Density is the biome blend's, evaluated at the candidate itself, so the
       // treeline thickens across the transition band instead of stepping at it.

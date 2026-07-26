@@ -8,9 +8,12 @@ import type { Hitstop } from '../combat/Hitstop';
 import type { System } from '../core/Engine';
 import type { PlayerController } from '../player/PlayerController';
 import type { HeightSampler } from '../world/HeightField';
+import type { SpatialHash } from '../world/SpatialHash';
 import { AI_STATE, STRIKE_RADIUS } from './AIBrain';
 import type { AIContext } from './AIBrain';
+import { ArchetypeEnemy, EnemyProjectiles } from './ArchetypeEnemy';
 import type { EnemyBase } from './EnemyBase';
+import type { EnemyDef as ArchetypeDef } from './EnemyDefs';
 import { SlimeEnemy } from './SlimeEnemy';
 
 /**
@@ -91,6 +94,8 @@ export class EnemyManager implements System {
   /** Phase 4 wiring; null until the bootstrap sets it. */
   freezeRef: FreezeSource | null = null;
   boardsRef: BoardSource | null = null;
+  /** Phase 5 wiring (optional): prop AABBs so charge attacks stop on props. */
+  propsRef: SpatialHash | null = null;
 
   /** Stable array — TargetLock iterates it; never reallocated per frame. */
   readonly enemies: EnemyBase[] = [];
@@ -106,6 +111,8 @@ export class EnemyManager implements System {
   /** §8.2's soul-drop economy arrives in Phase 4; Phase 6 spends this. */
   private xpTotal = 0;
   private seedCursor = 1237;
+  /** Phase 5: ONE projectile slab shared by every enemy, built on first need. */
+  private projectiles: EnemyProjectiles | null = null;
 
   /** Callback context for the pre-bound overlap visitor (§13: no closures). */
   private hitSource: EnemyBase | null = null;
@@ -185,6 +192,54 @@ export class EnemyManager implements System {
       if (this.boardsRef !== null) this.boardsRef.register(slime);
       this.enemies.push(slime);
     }
+  }
+
+  /**
+   * Phase 5: spawn one enemy from a validated enemies.json def (§4.1 extended
+   * to enemies — the def carries body, stats and attack; no kind reaches
+   * code). Returns the enemy, or null when §9's cap of 18 leaves no room.
+   * Spawns are director-managed: they never self-respawn — SpawnDirector owns
+   * the population and death releases its budget.
+   */
+  spawnDef(def: ArchetypeDef, x: number, z: number): EnemyBase | null {
+    this.purgeDead();
+    if (this.enemies.length >= EnemyManager.MAX_ENEMIES) return null;
+    const field = this.field;
+    let homeX = x;
+    let homeZ = z;
+    if (homeX < field.minX + SPAWN_MARGIN) homeX = field.minX + SPAWN_MARGIN;
+    else if (homeX > field.maxX - SPAWN_MARGIN) homeX = field.maxX - SPAWN_MARGIN;
+    if (homeZ < field.minZ + SPAWN_MARGIN) homeZ = field.minZ + SPAWN_MARGIN;
+    else if (homeZ > field.maxZ - SPAWN_MARGIN) homeZ = field.maxZ - SPAWN_MARGIN;
+
+    if (this.projectiles === null) {
+      this.projectiles = new EnemyProjectiles({
+        scene: this.scene,
+        hitbox: this.hitbox,
+        damage: this.damage,
+        field,
+      });
+    }
+
+    this.seedCursor = (this.seedCursor + 7919) | 0;
+    const enemy = new ArchetypeEnemy({
+      id: nextEnemyId++,
+      def,
+      field,
+      homeX,
+      homeZ,
+      seed: this.seedCursor,
+      hitbox: this.hitbox,
+      damage: this.damage,
+      projectiles: this.projectiles,
+      props: this.propsRef,
+      directorManaged: true,
+    });
+    this.scene.add(enemy.root);
+    this.hitbox.register(enemy);
+    if (this.boardsRef !== null) this.boardsRef.register(enemy);
+    this.enemies.push(enemy);
+    return enemy;
   }
 
   get aliveCount(): number {
@@ -280,6 +335,9 @@ export class EnemyManager implements System {
         if (hits > 0) enemy.markContactHit();
       }
     }
+
+    // Shared enemy shots fly on the same gate, so they freeze with hitstop too.
+    if (this.projectiles !== null) this.projectiles.update(dt);
   }
 
   render(alpha: number): void {
@@ -294,6 +352,7 @@ export class EnemyManager implements System {
       const z = prev.z + (cur.z - prev.z) * alpha;
       enemy.applyVisual(x, y, z, enemy.yaw);
     }
+    if (this.projectiles !== null) this.projectiles.render(alpha);
   }
 
   /** Everyone back to their home point at full hp; the population survives. */
@@ -305,6 +364,7 @@ export class EnemyManager implements System {
       const enemy = enemies[i];
       if (enemy !== undefined) enemy.reset();
     }
+    if (this.projectiles !== null) this.projectiles.reset();
   }
 
   dispose(): void {
@@ -317,6 +377,10 @@ export class EnemyManager implements System {
       enemy.dispose();
     }
     enemies.length = 0;
+    if (this.projectiles !== null) {
+      this.projectiles.dispose();
+      this.projectiles = null;
+    }
   }
 
   /** Debug hook (the gate's killAllEnemies) — through takeDamage so death flows run. */
