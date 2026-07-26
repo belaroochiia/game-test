@@ -95,6 +95,36 @@ tools/smoke.mjs            headless verification harness
    while hidden and resumes without fast-forwarding (the cube must not jump).
 5. Rotate the device: the canvas re-fits with no stretching and no black bars.
 
+## Measured — Phase 0
+
+Android handset, 120 Hz panel, Chromium-based browser, portrait, `npm run dev`
+over LAN:
+
+| Metric | Measured | §3 budget |
+|---|---|---|
+| FPS | **120.0** | ≥ 60 |
+| Frame time | **8.3 ms** (max 8.4) | ≤ 16.6 |
+| CPU (logic + render) | **0.2 ms** | — |
+| Draw calls | **2** | ≤ 110 |
+| Triangles | **14** | ≤ 150 000 |
+| Unique materials | 2 | ≤ 12 |
+| Texture memory | 0 MB | ≤ 48 MB |
+| JS heap | **16 MB** | ≤ 280 MB |
+| Drawing buffer | 576×984 @1.50 | pixel ratio ≤ 1.5 |
+| Fixed tick rate | **30 /s** | 30 Hz |
+| Bundle | 137 kB gzip | ≤ 8 MB |
+
+Phase 0's acceptance criterion is met. Two honest caveats:
+
+- This handset is **not** §3's reference device (Snapdragon 680 / Helio G85). A
+  14-triangle scene at 8.3 ms proves the boot path, the loop and the overlay are
+  correct; it proves nothing about whether the budget holds at 150 000 triangles
+  and 110 draw calls. Re-measure at the end of every phase, and on the weakest
+  device you can find.
+- Dynamic resolution scaling never engaged here because nothing was ever slow
+  enough. It was verified separately under software rendering, where frame time
+  rose to 87 ms and the ladder stepped 1.50 → 1.25 on its own.
+
 ### Caveat on `npm run smoke`
 
 The smoke test runs Chromium with SwiftShader **software** rendering, because CI
