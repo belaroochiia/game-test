@@ -7,7 +7,7 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 3 — Core combat. Complete, pending device test.**
+> **Status: Phase 3 — Core combat. Complete and device-verified.**
 > Phases 4–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
@@ -158,6 +158,13 @@ the feel is built from.
 | Seeded damage series | [24.8, 15.2] twice, identical | deterministic |
 | Draw calls / triangles | 44 / 50 300 | ≤ 110 / ≤ 150 000 |
 | Heap drift in a brawl | **0 B/frame** | < 2 KB/frame |
+
+**Device-verified** on the 120 Hz Android handset, all six §12 feel checks:
+hitstop reads as impact, the three-hit combo chains, the telegraph is readable
+and honest, dash i-frames beat the strike, death and respawn work, and the
+overlay stays inside budget mid-brawl. "Hitting a slime feels satisfying
+without VFX" — confirmed by the person holding the phone, which is the only
+instrument that can measure it.
 
 Notes from the phase:
 
