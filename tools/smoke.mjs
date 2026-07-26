@@ -97,6 +97,8 @@ let browser = null;
 /** @type {NodeJS.Timeout | null} */
 let hardTimer = null;
 let hardTimedOut = false;
+/** Signal name once the run has been cancelled, else null. */
+let interrupted = null;
 let cleanedUp = false;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -177,6 +179,7 @@ process.on('exit', () => {
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    interrupted = signal;
     console.error(`\n[smoke] ${signal} received — tearing down.`);
     setTimeout(() => process.exit(130), 4_000).unref();
     void cleanup().finally(() => process.exit(130));
@@ -857,8 +860,9 @@ function printSummary() {
     );
     if (smell) {
       console.log(`  SMELL      heap grew > ${HEAP_SMELL_MB} MB in a static scene — something in the`);
-      console.log('             loop is allocating. Not a hard failure here (the Profiler itself');
-      console.log('             builds strings 4x/s), but profile it before shipping Phase 1.');
+      console.log('             loop is allocating. Not a hard failure: the Profiler legitimately');
+      console.log('             builds strings 4x/s and this harness adds ~24 page.evaluate calls,');
+      console.log('             so treat it as a hint and confirm in a DevTools allocation profile.');
     } else {
       console.log('  verdict    flat enough — no obvious per-frame allocation.');
     }
@@ -916,12 +920,16 @@ async function main() {
     assertSamples();
     assertNoErrors();
   } catch (err) {
-    // After a hard timeout everything downstream throws "target closed" style
-    // noise; report the real cause instead of the cascade.
-    if (!hardTimedOut) {
+    // After a hard timeout or a Ctrl-C everything downstream throws "target
+    // closed" style noise; report the real cause instead of the cascade.
+    if (!hardTimedOut && interrupted === null) {
       if (err instanceof Fatal) fail('harness precondition', err.message);
       else fail('harness error', err?.stack ?? String(err));
     }
+  }
+
+  if (interrupted !== null) {
+    fail('interrupted', `${interrupted} received — the run was cancelled, so there is no verdict.`);
   }
 
   if (hardTimedOut) {
@@ -946,7 +954,8 @@ async function main() {
 
   printSummary();
   await cleanup();
-  process.exit(report.verdict === 'PASS' ? 0 : 1);
+  // 130 for a cancelled run so callers can tell "you stopped it" from "it failed".
+  process.exit(interrupted !== null ? 130 : report.verdict === 'PASS' ? 0 : 1);
 }
 
 process.on('unhandledRejection', (reason) => {
