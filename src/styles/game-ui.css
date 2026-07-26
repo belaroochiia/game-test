@@ -20,14 +20,35 @@
   top: calc(var(--ad-safe-t) + 8px);
   /* Clear of the profiler overlay, which sits at the same corner. */
   left: calc(var(--ad-safe-l) + 176px);
-  width: min(240px, 38vw);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hud__bars {
+  width: min(232px, 36vw);
   display: flex;
   flex-direction: column;
   gap: 5px;
 }
 
 .hud__bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud__bar-key {
+  width: 20px;
+  flex: none;
+  color: var(--ad-ink-dim);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.hud__bar-track {
   position: relative;
+  flex: 1;
   height: 15px;
   border: 1px solid var(--ad-panel-line);
   border-radius: 3px;
@@ -49,11 +70,11 @@
   background: linear-gradient(90deg, #b8324a, #e35d5d);
 }
 
-.hud__bar--mana .hud__bar-fill {
+.hud__bar--mp .hud__bar-fill {
   background: linear-gradient(90deg, #2f6ea8, #56b8e3);
 }
 
-.hud__bar-label {
+.hud__bar-num {
   position: absolute;
   inset: 0;
   display: grid;
@@ -65,10 +86,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Low health has to read peripherally, while the player is watching the fight. */
+.hud__bar--hp.is-critical .hud__bar-track {
+  border-color: rgba(255, 107, 107, 0.75);
+  animation: hud-critical 900ms ease-in-out infinite;
+}
+
+@keyframes hud-critical {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
 .hud__level {
-  position: absolute;
-  top: calc(var(--ad-safe-t) + 8px);
-  left: calc(var(--ad-safe-l) + 176px + min(240px, 38vw) + 10px);
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
   padding: 3px 9px;
   border: 1px solid rgba(127, 227, 196, 0.4);
   border-radius: 3px;
@@ -76,6 +113,15 @@
   color: var(--ad-accent);
   font-size: 11px;
   letter-spacing: 0.1em;
+}
+
+.hud__level-key {
+  color: var(--ad-ink-dim);
+  font-size: 9px;
+}
+
+.hud__level-num {
+  font-variant-numeric: tabular-nums;
 }
 
 .hud__icons {
@@ -88,23 +134,21 @@
   pointer-events: auto;
 }
 
+/*
+ * Inherits size, border and press feedback from main.css's `.hud-btn`, but that
+ * class is absolutely positioned for the standalone DBG button — inside this flex
+ * row it has to participate in layout instead.
+ */
 .hud__icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--ad-panel-line);
-  border-radius: 12px;
-  background: var(--ad-panel);
-  color: var(--ad-ink-dim);
+  position: relative;
+  top: auto;
+  right: auto;
   font-size: 19px;
-  cursor: pointer;
-  touch-action: manipulation;
 }
 
-.hud__icon:disabled {
-  opacity: 0.4;
-  cursor: default;
+/* aria-disabled, not :disabled — the buttons keep their press feedback (Phase 6). */
+.hud__icon[aria-disabled='true'] {
+  opacity: 0.45;
 }
 
 /* --------------------------------------------------------- touch controls */
@@ -300,12 +344,10 @@
   .hud__vitals {
     left: calc(var(--ad-safe-l) + 8px);
     top: calc(var(--ad-safe-t) + 190px);
-    width: min(260px, 62vw);
   }
 
-  .hud__level {
-    left: calc(var(--ad-safe-l) + 8px);
-    top: calc(var(--ad-safe-t) + 232px);
+  .hud__bars {
+    width: min(210px, 54vw);
   }
 
   .hud__icons {
