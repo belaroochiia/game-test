@@ -430,7 +430,10 @@ export class StatusEffects implements System {
         if (board.armorBreak < 0) board.armorBreak = 0;
       }
       board.dotClock += dt;
-      while (board.dotClock >= DOT_INTERVAL) {
+      // Epsilon: 30 accumulated dt's land a float hair under 0.5, which would
+      // slip every tick one step late and drop the FINAL tick of any duration
+      // that is a multiple of the interval (most JSON durations are).
+      while (board.dotClock >= DOT_INTERVAL - 1e-9) {
         board.dotClock -= DOT_INTERVAL;
         this.tickDot(board, c, STATUS.Burn);
         this.tickDot(board, c, STATUS.Bleed);
