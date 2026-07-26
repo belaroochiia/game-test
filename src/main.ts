@@ -4,114 +4,239 @@ import { Engine, WebGL2UnsupportedError } from './core/Engine';
 import type { System } from './core/Engine';
 import type { ProfilerMetrics } from './core/Profiler';
 
+import { TerrainGen } from './world/TerrainGen';
+import { SpatialHash } from './world/SpatialHash';
+import type { AABB } from './world/SpatialHash';
+
+import { createInputState } from './player/InputState';
+import { PlayerStats } from './player/PlayerStats';
+import { PlayerController } from './player/PlayerController';
+import type { PlayerState } from './player/PlayerController';
+import { CameraRig } from './player/CameraRig';
+import { BlockyAvatar } from './player/PlayerAvatar';
+import type { AvatarState } from './player/PlayerAvatar';
+
+import { KeyboardInput } from './input/KeyboardInput';
+import { TouchControls } from './ui/TouchControls';
+import { HUD } from './ui/HUD';
+
+import './styles/game-ui.css';
+
 /**
- * Phase 0 bootstrap (CLAUDE.md §12).
+ * Phase 1 bootstrap (CLAUDE.md §12): one terrain chunk, a blocky procedural
+ * player that walks/sprints/dashes under thumb control, and a collision-aware
+ * third-person camera.
  *
- * Scope on purpose: a grey cube spinning at 60 FPS with a truthful debug overlay.
- * No terrain, no player, no touch input — those are Phase 1. The only reason this
- * file has any scene content at all is that the acceptance criterion needs
- * something to render and something to interpolate.
+ * Not here yet, on purpose: chunk streaming, LOD, prop scattering, day/night,
+ * water (Phase 2), combat and enemies (Phase 3), skills (Phase 4).
  */
 
-const VERSION = '0.1.0-phase0';
+const VERSION = '0.2.0-phase1';
+
+const TERRAIN_SEED = 1337;
+/** Deterministic test obstacles so §7's prop push-out is verifiable before PropScatter exists. */
+const OBSTACLE_COUNT = 24;
 
 // ---------------------------------------------------------------------------
-// Phase 0 scene
+// Test obstacles — Phase 2's PropScatter replaces this wholesale
+// ---------------------------------------------------------------------------
+
+const obstacleMatrix = new THREE.Matrix4();
+const obstacleQuat = new THREE.Quaternion();
+const obstacleScale = new THREE.Vector3();
+const obstaclePos = new THREE.Vector3();
+const obstacleBox: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
+
+/**
+ * A single InstancedMesh of boxes (§3: one instanced mesh per prop type), each
+ * registered in the spatial hash. Deterministic from a seeded LCG so the layout
+ * is identical across reloads — the playtest warps to fixed coordinates.
+ */
+function buildObstacles(terrain: TerrainGen, props: SpatialHash): THREE.InstancedMesh {
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  const material = new THREE.MeshLambertMaterial({ color: 0x6b7a52, flatShading: true });
+  const mesh = new THREE.InstancedMesh(geometry, material, OBSTACLE_COUNT);
+  mesh.name = 'obstacles';
+  mesh.frustumCulled = true;
+
+  let seed = 0x9e3779b9;
+  const rand = (): number => {
+    // LCG — deterministic, no allocation, good enough for scattering.
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+
+  const span = terrain.size * 0.42;
+  for (let i = 0; i < OBSTACLE_COUNT; i++) {
+    // Keep a clear ring around spawn so the player never wakes up inside a rock.
+    let x = 0;
+    let z = 0;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      x = (rand() * 2 - 1) * span;
+      z = (rand() * 2 - 1) * span;
+      if (x * x + z * z > 25) break;
+    }
+
+    const width = 0.9 + rand() * 1.8;
+    const depth = 0.9 + rand() * 1.8;
+    const height = 0.7 + rand() * 2.4;
+    const groundY = terrain.heightAt(x, z);
+
+    obstaclePos.set(x, groundY + height * 0.5, z);
+    obstacleScale.set(width, height, depth);
+    obstacleQuat.identity();
+    obstacleMatrix.compose(obstaclePos, obstacleQuat, obstacleScale);
+    mesh.setMatrixAt(i, obstacleMatrix);
+
+    // Axis-aligned only — §7's collision is capsule-vs-AABB, so unrotated boxes
+    // keep the test content honest about what the collision code actually handles.
+    obstacleBox.minX = x - width * 0.5;
+    obstacleBox.maxX = x + width * 0.5;
+    obstacleBox.minY = groundY;
+    obstacleBox.maxY = groundY + height;
+    obstacleBox.minZ = z - depth * 0.5;
+    obstacleBox.maxZ = z + depth * 0.5;
+    props.insert(obstacleBox);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  return mesh;
+}
+
+// ---------------------------------------------------------------------------
+// Systems owned by the bootstrap
 // ---------------------------------------------------------------------------
 
 /**
- * The one thing on screen. Logic runs at the fixed tick and only writes plain
- * numbers; the visual transform is written in render() using the loop's
- * interpolation alpha, so the cube looks smooth on a 120 Hz panel without the
- * simulation ever running faster than FIXED_HZ (§4.2).
+ * Feeds the camera's yaw to the player, because movement is camera-relative (§6)
+ * while the camera follows the player. Running this first means the player uses
+ * last tick's yaw — one 16.7 ms tick of lag, which is imperceptible, and it
+ * avoids a circular dependency between the two systems.
  */
-class SpinRigSystem implements System {
-  readonly name = 'spinRig';
+class CameraLinkSystem implements System {
+  readonly name = 'cameraLink';
+  private readonly player: PlayerController;
+  private readonly rig: CameraRig;
 
-  private readonly mesh: THREE.Mesh;
-  private readonly ground: THREE.Mesh;
-  private readonly hemi: THREE.HemisphereLight;
-  private readonly sun: THREE.DirectionalLight;
-  private readonly scene: THREE.Scene;
-
-  private prevYaw = 0;
-  private yaw = 0;
-  private prevPitch = 0;
-  private pitch = 0;
-  private prevBob = 0;
-  private bob = 0;
-  private time = 0;
-
-  constructor(scene: THREE.Scene) {
-    this.scene = scene;
-
-    // Flat shading + vertex-lit lambert: no textures, no specular pass (§5).
-    const cubeGeo = new THREE.BoxGeometry(1.25, 1.25, 1.25);
-    const cubeMat = new THREE.MeshLambertMaterial({ color: 0x9aa0ad, flatShading: true });
-    this.mesh = new THREE.Mesh(cubeGeo, cubeMat);
-    this.mesh.position.set(0, 1.05, 0);
-    this.mesh.frustumCulled = true;
-
-    // A floor so the rotation reads as 3D. 2 triangles, 1 draw call.
-    const groundGeo = new THREE.PlaneGeometry(60, 60);
-    const groundMat = new THREE.MeshLambertMaterial({ color: 0x2c3448, flatShading: true });
-    this.ground = new THREE.Mesh(groundGeo, groundMat);
-    this.ground.rotation.x = -Math.PI / 2;
-
-    // §3: exactly one directional light, plus hemisphere fill. No point lights.
-    this.hemi = new THREE.HemisphereLight(0x9dc0ff, 0x2a2f3a, 1.0);
-    this.sun = new THREE.DirectionalLight(0xfff1d6, 1.5);
-    this.sun.position.set(12, 18, 8);
-
-    scene.add(this.mesh, this.ground, this.hemi, this.sun);
+  constructor(player: PlayerController, rig: CameraRig) {
+    this.player = player;
+    this.rig = rig;
   }
 
-  update(dt: number): void {
-    this.prevYaw = this.yaw;
-    this.prevPitch = this.pitch;
-    this.prevBob = this.bob;
-
-    this.time += dt;
-    this.yaw += dt * 0.9;
-    this.pitch += dt * 0.35;
-    this.bob = Math.sin(this.time * 1.6) * 0.18;
-  }
-
-  /** Allocation-free: only scalar writes into existing Euler/Vector3 objects. */
-  render(alpha: number): void {
-    const yaw = this.prevYaw + (this.yaw - this.prevYaw) * alpha;
-    const pitch = this.prevPitch + (this.pitch - this.prevPitch) * alpha;
-    const bob = this.prevBob + (this.bob - this.prevBob) * alpha;
-
-    this.mesh.rotation.y = yaw;
-    this.mesh.rotation.x = pitch;
-    this.mesh.position.y = 1.05 + bob;
+  update(): void {
+    this.player.cameraYaw = this.rig.yaw;
   }
 
   reset(): void {
-    this.time = 0;
-    this.yaw = 0;
-    this.prevYaw = 0;
-    this.pitch = 0;
-    this.prevPitch = 0;
-    this.bob = 0;
-    this.prevBob = 0;
+    this.player.cameraYaw = 0;
+  }
+}
+
+/**
+ * Scripted input override for automated tests. It runs AFTER the device input
+ * producers and re-applies only the fields a test explicitly set, so keyboard
+ * and touch cannot fight the script — and so a test that overrides nothing
+ * still sees real pointer input (which is how the multi-touch check works).
+ *
+ * NaN means "not overridden"; the boolean tri-state uses -1 for unset.
+ */
+class InputOverrideSystem implements System {
+  readonly name = 'inputOverride';
+  moveX = Number.NaN;
+  moveY = Number.NaN;
+  sprint = -1;
+  private readonly input: ReturnType<typeof createInputState>;
+
+  constructor(input: ReturnType<typeof createInputState>) {
+    this.input = input;
+  }
+
+  update(): void {
+    const input = this.input;
+    if (!Number.isNaN(this.moveX)) input.moveX = this.moveX;
+    if (!Number.isNaN(this.moveY)) input.moveY = this.moveY;
+    if (this.sprint >= 0) input.sprint = this.sprint === 1;
+  }
+
+  reset(): void {
+    this.moveX = Number.NaN;
+    this.moveY = Number.NaN;
+    this.sprint = -1;
+  }
+}
+
+/** Drives the avatar from interpolated player state. Allocation-free per frame. */
+class AvatarSystem implements System {
+  readonly name = 'avatar';
+  private readonly avatar: BlockyAvatar;
+  private readonly player: PlayerController;
+  private readonly state: AvatarState;
+
+  constructor(avatar: BlockyAvatar, player: PlayerController) {
+    this.avatar = avatar;
+    this.player = player;
+    this.state = {
+      x: 0,
+      y: 0,
+      z: 0,
+      yaw: 0,
+      speed: 0,
+      grounded: true,
+      state: player.state,
+    };
+  }
+
+  update(): void {
+    /* nothing to simulate — the avatar is presentation only */
+  }
+
+  render(alpha: number): void {
+    const player = this.player;
+    const previous = player.prevPosition;
+    const current = player.position;
+    const state = this.state;
+    state.x = previous.x + (current.x - previous.x) * alpha;
+    state.y = previous.y + (current.y - previous.y) * alpha;
+    state.z = previous.z + (current.z - previous.z) * alpha;
+    state.yaw = player.yaw;
+    state.speed = player.speed;
+    state.grounded = player.grounded;
+    state.state = player.state;
+    this.avatar.apply(state, alpha);
+  }
+
+  reset(): void {
+    this.avatar.reset();
   }
 
   dispose(): void {
-    this.scene.remove(this.mesh, this.ground, this.hemi, this.sun);
-    this.mesh.geometry.dispose();
-    (this.mesh.material as THREE.Material).dispose();
-    this.ground.geometry.dispose();
-    (this.ground.material as THREE.Material).dispose();
-    this.hemi.dispose();
-    this.sun.dispose();
+    this.avatar.dispose();
   }
 }
 
 // ---------------------------------------------------------------------------
-// Debug hook (consumed by tools/smoke.mjs)
+// Debug hook (consumed by tools/smoke.mjs and tools/playtest.mjs)
 // ---------------------------------------------------------------------------
+
+interface DebugPlayer {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  state: PlayerState;
+  speed: number;
+  grounded: boolean;
+  dashCooldownLeft: number;
+  invulnerable: boolean;
+}
+
+interface DebugCamera {
+  x: number;
+  y: number;
+  z: number;
+  fov: number;
+  yaw: number;
+  pitch: number;
+}
 
 interface ArcanumDebug {
   metrics(): ProfilerMetrics;
@@ -119,8 +244,14 @@ interface ArcanumDebug {
   tickCount(): number;
   elapsed(): number;
   toggleDebug(): boolean;
-  /** Pins the renderer to a ladder index and disables adaptive scaling. */
   setPixelRatio(index: number): number;
+  setInput(partial: Record<string, number | boolean>): void;
+  clearInput(): void;
+  press(button: string): void;
+  player(): DebugPlayer;
+  camera(): DebugCamera;
+  terrainHeightAt(x: number, z: number): number;
+  warp(x: number, z: number): void;
   version: string;
 }
 
@@ -142,7 +273,8 @@ function fail(message: string, detail?: unknown): void {
 
 function main(): void {
   const canvas = document.getElementById('game-canvas');
-  const uiRoot = document.getElementById('ui-root');
+  const uiRootElement = document.getElementById('ui-root');
+  const uiRoot = uiRootElement instanceof HTMLElement ? uiRootElement : document.body;
 
   if (!(canvas instanceof HTMLCanvasElement)) {
     fail('Canvas element #game-canvas is missing from the page.');
@@ -154,11 +286,7 @@ function main(): void {
 
   let engine: Engine;
   try {
-    engine = new Engine({
-      canvas,
-      uiRoot: uiRoot instanceof HTMLElement ? uiRoot : document.body,
-      debug: debugVisible,
-    });
+    engine = new Engine({ canvas, uiRoot, debug: debugVisible });
   } catch (error) {
     if (error instanceof WebGL2UnsupportedError) {
       fail(
@@ -171,16 +299,60 @@ function main(): void {
     return;
   }
 
-  // Exponential fog is what lets the far plane sit at ~180 units with no popping (§3).
-  engine.scene.fog = new THREE.FogExp2(0x0a0d14, 0.01);
-  engine.scene.background = new THREE.Color(0x0a0d14);
+  // --- world ---------------------------------------------------------------
+  const terrain = new TerrainGen({ seed: TERRAIN_SEED });
+  const props = new SpatialHash(5);
+  const obstacles = buildObstacles(terrain, props);
 
-  // Static framing for Phase 0. CameraRig replaces this in Phase 1 (§7).
-  engine.camera.position.set(4.4, 3.1, 5.6);
-  engine.camera.lookAt(0, 0.9, 0);
+  engine.scene.add(terrain.mesh, obstacles);
 
-  const spinRig = new SpinRigSystem(engine.scene);
-  engine.addSystem(spinRig);
+  // Dense exponential fog is what lets the far plane sit at 180 units (§3).
+  // SkyDayNight replaces these constants in Phase 2.
+  engine.scene.fog = new THREE.FogExp2(0x9fc4d8, 0.012);
+  engine.scene.background = new THREE.Color(0x9fc4d8);
+
+  const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x4a5340, 1.0);
+  const sun = new THREE.DirectionalLight(0xfff3d8, 1.45);
+  sun.position.set(14, 22, 9);
+  engine.scene.add(hemi, sun);
+
+  // --- player --------------------------------------------------------------
+  const input = createInputState();
+  const stats = new PlayerStats();
+  const player = new PlayerController({ terrain, props, input, stats, spawnX: 0, spawnZ: 0 });
+
+  const avatar = new BlockyAvatar();
+  engine.scene.add(avatar.root);
+
+  const cameraRig = new CameraRig({
+    camera: engine.camera,
+    target: player,
+    terrain,
+    props,
+    input,
+  });
+
+  // --- input + UI ----------------------------------------------------------
+  const keyboard = new KeyboardInput(input);
+  const override = new InputOverrideSystem(input);
+  const touch = new TouchControls({ mount: uiRoot, input, stats, player });
+  const hud = new HUD({ mount: uiRoot, stats });
+
+  touch.setSensitivity(0.005);
+  cameraRig.setSensitivity(touch.sensitivity);
+  cameraRig.setInvertY(touch.invertY);
+
+  // Order matters: link (camera yaw -> player) → device input → scripted
+  // override → stats → player → camera → avatar → HUD.
+  engine.addSystem(new CameraLinkSystem(player, cameraRig));
+  engine.addSystem(keyboard);
+  engine.addSystem(touch);
+  engine.addSystem(override);
+  engine.addSystem(stats);
+  engine.addSystem(player);
+  engine.addSystem(cameraRig);
+  engine.addSystem(new AvatarSystem(avatar, player));
+  engine.addSystem(hud);
 
   // --- debug overlay toggle ------------------------------------------------
   const debugButton = document.getElementById('btn-debug');
@@ -203,13 +375,10 @@ function main(): void {
     });
   }
 
-  // Desktop convenience while developing; harmless on phones.
   window.addEventListener('keydown', (event: KeyboardEvent) => {
     if (event.key === 'p' || event.key === 'P') toggleDebug();
   });
 
-  // A lost context on mobile is common (backgrounding, GPU reset) and silently
-  // freezes the game unless we say something.
   canvas.addEventListener('webglcontextlost', (event: Event) => {
     event.preventDefault();
     if (boot !== null) boot.classList.remove('is-gone');
@@ -221,8 +390,6 @@ function main(): void {
   // --- debug hook ---------------------------------------------------------
   const debug: ArcanumDebug = {
     metrics: () => {
-      // Profiler hands back a live internal object; copy it so callers (and
-      // structured-clone across the CDP boundary) get a stable snapshot.
       const m = engine.profiler.metrics;
       return {
         fps: m.fps,
@@ -246,17 +413,72 @@ function main(): void {
     elapsed: () => engine.elapsed,
     toggleDebug,
     setPixelRatio: (index: number) => {
-      // Pin the ladder so an adaptive step cannot fight the test that just set it.
       engine.resolution.setEnabled(false);
       const applied = engine.resolution.setIndex(index);
       engine.resize();
       return applied;
     },
+
+    setInput: (partial: Record<string, number | boolean>) => {
+      const moveX = partial['moveX'];
+      const moveY = partial['moveY'];
+      const sprint = partial['sprint'];
+      const lookDX = partial['lookDX'];
+      const lookDY = partial['lookDY'];
+      if (typeof moveX === 'number') override.moveX = moveX;
+      if (typeof moveY === 'number') override.moveY = moveY;
+      if (typeof sprint === 'boolean') override.sprint = sprint ? 1 : 0;
+      // Look deltas are consumed once per tick by the rig, so they are additive
+      // rather than sticky — overriding them would freeze the camera.
+      if (typeof lookDX === 'number') input.lookDX += lookDX;
+      if (typeof lookDY === 'number') input.lookDY += lookDY;
+    },
+    clearInput: () => {
+      override.reset();
+      input.moveX = 0;
+      input.moveY = 0;
+      input.sprint = false;
+    },
+    press: (button: string) => {
+      const now = performance.now();
+      if (button === 'dash') input.dashQueuedAt = now;
+      else if (button === 'attack') input.attackQueuedAt = now;
+      else {
+        const slot = Number.parseInt(button, 10);
+        if (slot >= 0 && slot <= 3) input.skillQueuedAt[slot] = now;
+      }
+    },
+
+    player: () => ({
+      x: player.position.x,
+      y: player.position.y,
+      z: player.position.z,
+      yaw: player.yaw,
+      state: player.state,
+      speed: player.speed,
+      grounded: player.grounded,
+      dashCooldownLeft: player.dashCooldownLeft,
+      invulnerable: player.invulnerable,
+    }),
+    camera: () => ({
+      x: engine.camera.position.x,
+      y: engine.camera.position.y,
+      z: engine.camera.position.z,
+      fov: engine.camera.fov,
+      yaw: cameraRig.yaw,
+      pitch: cameraRig.pitch,
+    }),
+    terrainHeightAt: (x: number, z: number) => terrain.heightAt(x, z),
+    warp: (x: number, z: number) => {
+      player.position.set(x, terrain.heightAt(x, z), z);
+      player.prevPosition.copy(player.position);
+      player.velocity.set(0, 0, 0);
+    },
+
     version: VERSION,
   };
   (globalThis as DebugGlobal).__ARCANUM_DEBUG__ = debug;
 
-  // Hide the boot screen only once we know frames are actually landing.
   const waitForFirstFrames = (): void => {
     if (engine.frameCount >= 2) {
       if (boot !== null) boot.classList.add('is-gone');
@@ -267,7 +489,7 @@ function main(): void {
   window.requestAnimationFrame(waitForFirstFrames);
 
   if (import.meta.env.DEV) {
-    console.info('[arcanum] phase 0 online —', VERSION);
+    console.info('[arcanum] phase 1 online —', VERSION);
   }
 }
 

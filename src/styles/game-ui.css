@@ -1,0 +1,347 @@
+/* ===========================================================================
+   ARCANUM DRIFT — game UI: HUD (§6 top-left) and touch controls (§6 bottom).
+   Palette, safe-area vars and the #ui-root overlay rules come from main.css.
+
+   Performance rules this file obeys (§3, §13): only `transform` and `opacity`
+   animate, no backdrop-filter over large areas, no blur, and no box-shadow on
+   anything that moves.
+   =========================================================================== */
+
+/* ------------------------------------------------------------------- HUD */
+
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.hud__vitals {
+  position: absolute;
+  top: calc(var(--ad-safe-t) + 8px);
+  /* Clear of the profiler overlay, which sits at the same corner. */
+  left: calc(var(--ad-safe-l) + 176px);
+  width: min(240px, 38vw);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.hud__bar {
+  position: relative;
+  height: 15px;
+  border: 1px solid var(--ad-panel-line);
+  border-radius: 3px;
+  background: rgba(6, 9, 14, 0.66);
+  overflow: hidden;
+}
+
+.hud__bar-fill {
+  position: absolute;
+  inset: 0;
+  /* scaleX from the left edge: no reflow, and it animates on the compositor. */
+  transform-origin: 0 50%;
+  transform: scaleX(1);
+  transition: transform 140ms linear;
+  will-change: transform;
+}
+
+.hud__bar--hp .hud__bar-fill {
+  background: linear-gradient(90deg, #b8324a, #e35d5d);
+}
+
+.hud__bar--mana .hud__bar-fill {
+  background: linear-gradient(90deg, #2f6ea8, #56b8e3);
+}
+
+.hud__bar-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--ad-ink);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  font-variant-numeric: tabular-nums;
+}
+
+.hud__level {
+  position: absolute;
+  top: calc(var(--ad-safe-t) + 8px);
+  left: calc(var(--ad-safe-l) + 176px + min(240px, 38vw) + 10px);
+  padding: 3px 9px;
+  border: 1px solid rgba(127, 227, 196, 0.4);
+  border-radius: 3px;
+  background: rgba(6, 9, 14, 0.66);
+  color: var(--ad-accent);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.hud__icons {
+  position: absolute;
+  top: calc(var(--ad-safe-t) + 8px);
+  /* Left of the DBG button, which main.css pins to the right edge. */
+  right: calc(var(--ad-safe-r) + 70px);
+  display: flex;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.hud__icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ad-panel-line);
+  border-radius: 12px;
+  background: var(--ad-panel);
+  color: var(--ad-ink-dim);
+  font-size: 19px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.hud__icon:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* --------------------------------------------------------- touch controls */
+
+.tc {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  touch-action: none;
+}
+
+/*
+ * §6: left third moves, the rest is camera swipe. The stick zone stops short of
+ * the bottom-right cluster, so dragging to walk can never land on a button.
+ */
+.tc__stick-zone {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  top: 88px;
+  width: 42%;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.tc__look-zone {
+  position: absolute;
+  left: 42%;
+  right: 0;
+  top: 88px;
+  bottom: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* Positioned at the touch point in JS (§6.1: dynamic origin), so no fixed spot. */
+.tc__stick {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 20;
+}
+
+.tc__stick.is-active {
+  opacity: 1;
+}
+
+.tc__stick-base {
+  position: absolute;
+  width: 118px;
+  height: 118px;
+  margin: -59px 0 0 -59px;
+  border: 2px solid rgba(232, 230, 223, 0.28);
+  border-radius: 50%;
+  background: rgba(10, 13, 20, 0.3);
+}
+
+.tc__stick-knob {
+  position: absolute;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid rgba(127, 227, 196, 0.55);
+  background: rgba(127, 227, 196, 0.22);
+  transform: translate(-50%, -50%);
+  will-change: transform;
+}
+
+.tc__buttons {
+  position: absolute;
+  right: calc(var(--ad-safe-r) + 14px);
+  bottom: calc(var(--ad-safe-b) + 14px);
+  display: grid;
+  /* Two rows of three: skills above, action buttons below (§6's diagram). */
+  grid-template-columns: repeat(3, 64px);
+  gap: 12px;
+  pointer-events: auto;
+  z-index: 30;
+}
+
+.tc__btn {
+  /* §6.3: 56 px is the floor; 64 px is comfortable for a thumb in motion. */
+  position: relative;
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ad-panel-line);
+  border-radius: 50%;
+  background: rgba(10, 13, 20, 0.6);
+  color: var(--ad-ink);
+  font: inherit;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  overflow: hidden;
+  transition: transform 80ms ease, border-color 120ms ease;
+}
+
+.tc__btn-icon {
+  position: relative;
+  z-index: 2;
+  font-size: 24px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/*
+ * The cooldown sweep. `--cd` runs 1 -> 0 as the cooldown expires, so the dark
+ * wedge shrinks clockwise. A conic-gradient costs one fragment op; a canvas or an
+ * SVG animation would cost a lot more (§3).
+ */
+.tc__btn-cd {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0;
+  background: conic-gradient(
+    rgba(6, 9, 14, 0.78) calc(var(--cd, 0) * 360deg),
+    rgba(6, 9, 14, 0) 0
+  );
+}
+
+.tc__btn-cd-text {
+  position: absolute;
+  z-index: 3;
+  bottom: 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ad-ink);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+.tc__btn--skill {
+  border-color: rgba(127, 227, 196, 0.34);
+}
+
+.tc__btn--attack {
+  border-color: rgba(255, 209, 102, 0.45);
+  grid-column: 2;
+}
+
+.tc__btn--dash {
+  border-color: rgba(160, 200, 255, 0.45);
+  grid-column: 3;
+}
+
+/* --- button states (§6.8) ------------------------------------------------ */
+
+.tc__btn.is-pressed {
+  transform: scale(0.9);
+  border-color: var(--ad-accent);
+}
+
+.tc__btn.is-cooldown .tc__btn-cd {
+  opacity: 1;
+}
+
+.tc__btn.is-cooldown .tc__btn-icon {
+  opacity: 0.5;
+}
+
+.tc__btn.is-nomana {
+  border-color: rgba(255, 107, 107, 0.5);
+}
+
+.tc__btn.is-nomana .tc__btn-icon {
+  opacity: 0.4;
+}
+
+.tc__btn.is-disabled,
+.tc__btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* --------------------------------------------------------------- portrait */
+
+/*
+ * Landscape is primary (§6). Portrait stays playable: the zones split lower down
+ * so the controls sit within thumb reach, and the HUD drops below the profiler
+ * instead of trying to share its row.
+ */
+@media (orientation: portrait) and (max-width: 820px) {
+  .hud__vitals {
+    left: calc(var(--ad-safe-l) + 8px);
+    top: calc(var(--ad-safe-t) + 190px);
+    width: min(260px, 62vw);
+  }
+
+  .hud__level {
+    left: calc(var(--ad-safe-l) + 8px);
+    top: calc(var(--ad-safe-t) + 232px);
+  }
+
+  .hud__icons {
+    right: calc(var(--ad-safe-r) + 8px);
+    top: calc(var(--ad-safe-t) + 70px);
+  }
+
+  .tc__stick-zone {
+    width: 100%;
+    top: 55%;
+    bottom: 42%;
+  }
+
+  .tc__look-zone {
+    left: 0;
+    top: 88px;
+    bottom: 45%;
+  }
+
+  .tc__buttons {
+    grid-template-columns: repeat(3, 60px);
+    gap: 10px;
+  }
+
+  .tc__btn {
+    width: 60px;
+    height: 60px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud__bar-fill {
+    transition: none;
+  }
+
+  .tc__stick {
+    transition: none;
+  }
+}

@@ -7,9 +7,9 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 0 — Foundation. Complete.**
-> Phases 1–7 are not started. Do not add gameplay features before Phase 0's
-> acceptance criterion is verified on hardware (§12, §13).
+> **Status: Phase 1 — Player moves in the world. Complete, pending device test.**
+> Phases 2–7 are not started. Do not add features from a later phase before the
+> current one's acceptance criterion is verified on hardware (§12, §13).
 
 ## Stack
 
@@ -38,24 +38,65 @@ your phone. Desktop DevTools device mode is *not* a substitute (§13).
 npm run typecheck  # tsc --noEmit, strict
 npm run build      # typecheck + production bundle into dist/
 npm run preview    # serve dist/ over the LAN
-npm run smoke      # headless Chromium budget check against dist/ (see caveat below)
+npm run smoke      # headless boot + budget check against dist/ (see caveat below)
+npm run playtest   # headless gameplay gate: drives the player, measures §7's numbers
 ```
 
-## What Phase 0 contains
+Desktop controls for development: **WASD** move, **Shift** sprint, **Space** dash,
+**J** or left-click attack, **1–4** skills, **mouse drag** look, **P** toggles the
+profiler overlay.
+
+## What exists
 
 ```
 src/
-  main.ts                  bootstrap, WebGL2 guard, debug hook, the spinning cube
-  core/
+  main.ts                  bootstrap: world assembly, system order, debug hook
+  core/                    [Phase 0]
     Engine.ts              renderer + scene + camera + system list + frame wiring
     Loop.ts                fixed 60 Hz logic accumulator, uncapped interpolated render
     DynamicResolution.ts   adaptive pixel-ratio ladder driven by smoothed frame time
     Profiler.ts            FPS / frame / CPU / draws / tris / heap DOM overlay
     EventBus.ts            typed, allocation-free, re-entrancy safe pub-sub
     ObjectPool.ts          generic pool with hard cap and high-water tracking
-  styles/main.css          game-surface CSS: no scroll, no zoom, safe-area aware
-tools/smoke.mjs            headless verification harness
+  world/                   [Phase 1]
+    TerrainGen.ts          seeded value-noise heightmap, vertex-coloured, analytic sampling
+    SpatialHash.ts         5x5 grid of AABBs for prop collision, allocation-free queries
+  player/                  [Phase 1]
+    PlayerController.ts    capsule movement, state machine, terrain + prop collision
+    CameraRig.ts           third-person orbit, collision-aware, sprint FOV, screen shake
+    PlayerAvatar.ts        blocky procedural character + the GLTF swap seam (§5)
+    PlayerStats.ts         §10's five stats, HP/MP pools, mana regen
+    InputState.ts          the one input struct, with §7's 0.12 s input buffer
+  input/KeyboardInput.ts   [Phase 1] desktop input; also what the playtest drives
+  ui/                      [Phase 1]
+    TouchControls.ts       dynamic joystick, camera zone, skill/attack/dash buttons
+    HUD.ts                 HP/MP bars, level chip, icon row
+  styles/
+    main.css               game-surface CSS: no scroll, no zoom, safe-area aware
+    game-ui.css            HUD + touch control layout
+tools/
+  smoke.mjs                headless boot and budget gate
+  playtest.mjs             headless gameplay gate: measures §7's movement numbers
 ```
+
+### Phase 1 notes
+
+- **Terrain height is exact, not approximate.** `heightAt()` returns the plane of
+  the triangle the GPU actually draws — it picks the triangle from the quad's
+  diagonal split and interpolates barycentrically. Bilinear interpolation over the
+  quad would look smooth and be wrong, making the player float on one half of
+  every quad and sink on the other. Verified: max disagreement between
+  `heightAt()` and the mesh over 20 000 random points is **1.8e-15**.
+- **There is no jump.** §7 asks for coyote time "for jump/dash", but §6's control
+  layout has no jump button, so the game has no jump. Coyote time is applied to
+  **dash** instead: it stays available for 0.1 s after leaving the ground.
+- **Soft target lock (§6.6) is deferred to Phase 3.** It needs enemy positions and
+  there are no enemies yet. Stubbing a fake version would have been worse than
+  waiting.
+- Skill buttons carry placeholder costs and cooldowns so their cooldown sweep and
+  no-mana states are real and visible. `SkillRegistry` replaces those in Phase 4.
+- Test obstacles are one `InstancedMesh` of 24 boxes registered in the spatial
+  hash — enough to prove §7's push-out works. `PropScatter` replaces it in Phase 2.
 
 ### Engine conventions worth knowing before Phase 1
 
@@ -95,6 +136,41 @@ tools/smoke.mjs            headless verification harness
 4. Lock the screen and unlock it, or switch tabs and come back: the loop pauses
    while hidden and resumes without fast-forwarding (the cube must not jump).
 5. Rotate the device: the canvas re-fits with no stretching and no black bars.
+
+## Measured — Phase 1 (headless gate)
+
+`npm run playtest` drives the player through the debug hook and measures §7's
+numbers. **24/24 checks pass.** Software rendering, so the timings are not device
+numbers — everything else here is real:
+
+| Measured | Value | Required |
+|---|---|---|
+| Walk speed | **4.00 u/s** | 4 ±12 % |
+| Sprint speed | **7.00 u/s** | 7 ±12 % |
+| Dash peak speed | **14.00 u/s** | > 12 |
+| Dash burst | 0.148 s | 0.18 ±0.04 |
+| Dash i-frame | 0.138 s | 0.15 ±0.05 |
+| Second dash inside 1.2 s | refused | refused |
+| Worst ground deviation | **0.0000 u** | < 0.12 |
+| Worst camera clearance | **0.360 u** | > 0.2 |
+| Sprint FOV | 72.0° | ~72 |
+| 45° slope net climb | 0.22 u over 2.5 s | < 2.5 |
+| Draw calls | **9** | ≤ 110 |
+| Triangles | **5 372** | ≤ 150 000 |
+| Heap | 3.7 MB | ≤ 280 |
+| Tick rate | 60.0 /s | 60 |
+| Heap drift | **0 B/frame** | ~0 |
+| Multi-touch stick + button | both registered | both |
+
+The dash burst and i-frame read slightly short because the sampler counts
+rendered frames, not ticks, so it quantises to the frame interval; the underlying
+timers are 0.18 s and 0.15 s exactly.
+
+Triangle budget breakdown: terrain 5 000, obstacles 288, avatar 84. Draw calls:
+terrain 1, obstacles 1 (instanced), avatar 7.
+
+**Still required: the device test.** §12's acceptance criterion is thumb feel, and
+no headless gate can measure that.
 
 ## Measured — Phase 0
 
