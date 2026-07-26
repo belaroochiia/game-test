@@ -20,6 +20,17 @@ import { CameraRig } from './player/CameraRig';
 import { BlockyAvatar } from './player/PlayerAvatar';
 import type { AvatarState } from './player/PlayerAvatar';
 
+import { TEAM } from './combat/CombatTypes';
+import type { Combatant, DamagePacket } from './combat/CombatTypes';
+import { Hitstop } from './combat/Hitstop';
+import { HitboxSystem } from './combat/HitboxSystem';
+import type { HitQuery } from './combat/HitboxSystem';
+import { DamageSystem, setSeed as setDamageSeed } from './combat/DamageSystem';
+import { TargetLock } from './combat/TargetLock';
+import { EnemyBase } from './enemy/EnemyBase';
+import { EnemyManager } from './enemy/EnemyManager';
+import { DamageNumbers } from './ui/DamageNumbers';
+
 import { KeyboardInput } from './input/KeyboardInput';
 import { TouchControls } from './ui/TouchControls';
 import { HUD } from './ui/HUD';
@@ -27,14 +38,15 @@ import { HUD } from './ui/HUD';
 import './styles/game-ui.css';
 
 /**
- * Phase 2 bootstrap (CLAUDE.md §12): a streamed 600x600 world of two biomes with
- * LOD, instanced props, a 12-minute day-night cycle, and water.
+ * Phase 3 bootstrap (CLAUDE.md §12): combat. The streamed world of Phase 2 plus
+ * the melee combo, hitstop, damage numbers, a slime camp with readable
+ * telegraphs, soft target lock, and death/respawn on both sides.
  *
- * Not here yet, on purpose: combat and enemies (Phase 3), skills (Phase 4),
- * shrines and bosses (Phase 5), progression and save (Phase 6).
+ * Not here yet, on purpose: skills (Phase 4), the full bestiary and spawn
+ * budgets (Phase 5), progression and save (Phase 6).
  */
 
-const VERSION = '0.3.0-phase2';
+const VERSION = '0.4.0-phase3';
 
 const WORLD_SEED = 1337;
 
@@ -181,8 +193,28 @@ class WorldLinkSystem implements System {
   }
 }
 
+/** Feeds §6.6's lock into the player's auto-aim each tick. */
+class AimLinkSystem implements System {
+  readonly name = 'aimLink';
+  private readonly player: PlayerController;
+  private readonly lock: TargetLock;
+
+  constructor(player: PlayerController, lock: TargetLock) {
+    this.player = player;
+    this.lock = lock;
+  }
+
+  update(): void {
+    this.player.aimYaw = this.lock.hasTarget ? this.lock.yawToTarget : Number.NaN;
+  }
+
+  reset(): void {
+    this.player.aimYaw = Number.NaN;
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Debug hook (consumed by tools/smoke.mjs, playtest.mjs, worldtest.mjs)
+// Debug hook (consumed by smoke/playtest/worldtest/combattest)
 // ---------------------------------------------------------------------------
 
 interface DebugPlayer {
@@ -235,7 +267,33 @@ interface ArcanumDebug {
   setDayPhase(phase: number): void;
   dayPhase(): number;
   world(): DebugWorld;
+  enemies(): DebugEnemy[];
+  combat(): DebugCombat;
+  setDamageSeed(n: number): void;
+  spawnSlimes(x: number, z: number, count: number, radius: number): void;
+  killAllEnemies(): void;
   version: string;
+}
+
+interface DebugEnemy {
+  id: number;
+  kind: string;
+  x: number;
+  y: number;
+  z: number;
+  hp: number;
+  maxHp: number;
+  state: number;
+  telegraphing: boolean;
+  alive: boolean;
+}
+
+interface DebugCombat {
+  hitstopActive: boolean;
+  hitstopTicksLeft: number;
+  comboStage: number;
+  lockedTargetId: number;
+  playerIFrames: number;
 }
 
 type DebugGlobal = { __ARCANUM_DEBUG__?: ArcanumDebug };
@@ -326,6 +384,88 @@ function main(): void {
     props: scatter,
   });
 
+  // --- combat (Phase 3) ----------------------------------------------------
+  const hitstop = new Hitstop();
+  const hitbox = new HitboxSystem();
+  const damage = new DamageSystem({ hitstop, bus: engine.bus });
+  player.hitstopRef = hitstop;
+
+  /**
+   * The player's face in the combat system. PlayerController stays ignorant of
+   * combat plumbing; this adapter is the whole coupling.
+   */
+  const playerCombatant: Combatant = {
+    id: 1,
+    position: player.position,
+    radius: 0.4,
+    height: 1.8,
+    team: TEAM.Player,
+    get alive() {
+      return player.alive && stats.hp > 0;
+    },
+    takeDamage(packet: DamagePacket): number {
+      return player.applyDamage(packet.amount, packet.knockX, packet.knockZ);
+    },
+  };
+  hitbox.register(playerCombatant);
+
+  const enemies = new EnemyManager({
+    scene: engine.scene,
+    field,
+    player,
+    hitbox,
+    damage,
+    hitstop,
+  });
+  // A small camp east of spawn: far enough that nothing aggros at boot (radius
+  // 11), close enough that the first fight is under twenty seconds away.
+  enemies.spawnSlimes(14, -6, 3, 3.5);
+
+  const targetLock = new TargetLock({
+    scene: engine.scene,
+    camera: engine.camera,
+    player,
+    enemies,
+  });
+
+  const damageNumbers = new DamageNumbers({ mount: uiRoot, camera: engine.camera });
+
+  /** Melee scaling (§9's statScaling term): agility carries the sword. */
+  const meleeScaling = (): number => stats.agility * 0.35;
+
+  const strikeQuery: HitQuery = { x: 0, y: 0, z: 0, radius: 0, team: TEAM.Player, sourceId: 1 };
+  let strikeBase = 0;
+  let strikeHeavy = false;
+  let strikeKnockX = 0;
+  let strikeKnockZ = 0;
+  const onStrikeHit = (target: Combatant): void => {
+    const armor = target instanceof EnemyBase ? target.def.armor : 0;
+    damage.deal(
+      target,
+      strikeBase,
+      meleeScaling(),
+      armor,
+      strikeHeavy,
+      1,
+      strikeKnockX,
+      strikeKnockZ,
+      target.position.x,
+      target.position.y + target.height * 0.7,
+      target.position.z,
+    );
+  };
+  player.onStrike = (_stage, x, y, z, radius, base, heavy, knockX, knockZ) => {
+    strikeQuery.x = x;
+    strikeQuery.y = y;
+    strikeQuery.z = z;
+    strikeQuery.radius = radius;
+    strikeBase = base;
+    strikeHeavy = heavy;
+    strikeKnockX = knockX;
+    strikeKnockZ = knockZ;
+    hitbox.overlapSphere(strikeQuery, onStrikeHit);
+  };
+
   const avatar = new BlockyAvatar();
   engine.scene.add(avatar.root);
 
@@ -335,6 +475,26 @@ function main(): void {
     terrain: field,
     props,
     input,
+  });
+
+  // Damage fan-out: numbers always; trauma and haptics scale with weight, and
+  // getting hit shakes harder than dealing (§7's trauma-based shake).
+  const canBuzz = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
+  damage.onDamage((event) => {
+    damageNumbers.spawn(
+      event.packet.hitX,
+      event.packet.hitY,
+      event.packet.hitZ,
+      event.applied,
+      event.packet.crit,
+      event.packet.heavy,
+    );
+    if (event.target === playerCombatant) {
+      cameraRig.addTrauma(0.4);
+    } else {
+      cameraRig.addTrauma(event.packet.heavy ? 0.28 : 0.1);
+      if (canBuzz) navigator.vibrate(10); // §6.7
+    }
   });
 
   // Build the spawn neighbourhood before the first frame, behind the loading
@@ -355,12 +515,19 @@ function main(): void {
   // Order: link → device input → scripted override → stats → player → streaming
   // → camera → avatar → world links → HUD. Streaming runs after the player moves
   // so it always windows on this tick's position.
+  // Hitstop must tick first so gated systems see a fresh freeze state (§9).
+  engine.addSystem(hitstop);
   engine.addSystem(new CameraLinkSystem(player, cameraRig));
   engine.addSystem(keyboard);
   engine.addSystem(touch);
   engine.addSystem(override);
   engine.addSystem(stats);
   engine.addSystem(player);
+  engine.addSystem(enemies);
+  engine.addSystem(hitbox);
+  engine.addSystem(damage);
+  engine.addSystem(targetLock);
+  engine.addSystem(new AimLinkSystem(player, targetLock));
   engine.addSystem(chunks);
   engine.addSystem(scatterSystemFor(scatter));
   engine.addSystem(cameraRig);
@@ -368,6 +535,7 @@ function main(): void {
   engine.addSystem(water);
   engine.addSystem(sky);
   engine.addSystem(new WorldLinkSystem(player, water, chunks, sky));
+  engine.addSystem(damageNumbers);
   engine.addSystem(hud);
 
   // --- debug overlay toggle ------------------------------------------------
@@ -515,6 +683,45 @@ function main(): void {
       seaLevel: SEA_LEVEL,
       worldSize: field.worldSize,
     }),
+
+    enemies: () => {
+      // Fresh objects: this crosses the CDP boundary and must be serialisable.
+      const list: DebugEnemy[] = [];
+      const all = enemies.enemies;
+      for (let i = 0; i < all.length; i++) {
+        const enemy = all[i];
+        if (enemy === undefined) continue;
+        list.push({
+          id: enemy.id,
+          kind: enemy.def.kind,
+          x: enemy.position.x,
+          y: enemy.position.y,
+          z: enemy.position.z,
+          hp: enemy.hp,
+          maxHp: enemy.def.maxHp,
+          state: enemy.brain.state,
+          telegraphing: enemy.brain.telegraphing,
+          alive: enemy.alive,
+        });
+      }
+      return list;
+    },
+    combat: () => ({
+      hitstopActive: hitstop.active,
+      hitstopTicksLeft: hitstop.ticksLeft,
+      comboStage: player.comboStage,
+      lockedTargetId: targetLock.target !== null ? targetLock.target.id : -1,
+      playerIFrames: player.iframesLeft,
+    }),
+    setDamageSeed: (n: number) => {
+      setDamageSeed(n);
+    },
+    spawnSlimes: (x: number, z: number, count: number, radius: number) => {
+      enemies.spawnSlimes(x, z, count, radius);
+    },
+    killAllEnemies: () => {
+      enemies.killAll();
+    },
 
     version: VERSION,
   };

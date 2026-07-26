@@ -228,13 +228,24 @@ async function loadPlaywright() {
 const SAMPLER = (options) => {
   const debug = globalThis.__ARCANUM_DEBUG__;
   return new Promise((resolve) => {
+    // This is the MOVEMENT gate (§7): live enemies chasing the player through a
+    // measurement corrupt it — a slime tagging the player mid-dash truncates the
+    // burst into a Hit state and reads as a regression. The Phase 3+ surface has
+    // killAllEnemies; on older builds it simply does not exist. Dead enemies can
+    // respawn after 12 s, hence per-section rather than once at boot.
+    if (typeof debug.killAllEnemies === 'function') debug.killAllEnemies();
     if (options.warp) debug.warp(options.warp[0], options.warp[1]);
     if (options.clear) debug.clearInput();
     if (options.input) debug.setInput(options.input);
-    if (options.press) debug.press(options.press);
 
     const samples = [];
     const started = performance.now();
+    // Deferred press: on a slow page several 60 Hz ticks run before the first
+    // rAF sample, so pressing up front can start (and part-consume) the action
+    // before sampling begins — the first sample is then already inside the
+    // state and spanBounds has no valid "before" edge. Pressing after the first
+    // sample guarantees both edges of the span are bracketed by samples.
+    let pressed = options.press === undefined;
 
     const tick = () => {
       const now = performance.now();
@@ -242,8 +253,13 @@ const SAMPLER = (options) => {
       const c = debug.camera();
       const m = debug.metrics();
       if (options.look) debug.setInput({ lookDX: options.look, lookDY: 0 });
+      if (!pressed && samples.length >= 1) {
+        pressed = true;
+        debug.press(options.press);
+      }
       samples.push({
         t: (now - started) / 1000,
+        e: debug.elapsed(),
         x: p.x,
         y: p.y,
         z: p.z,
@@ -450,19 +466,34 @@ async function main() {
       press: 'dash',
     });
     const dashPeak = peak(dash, 'speed');
-    let dashFrames = 0;
-    let iframeFirst = Infinity;
-    let iframeLast = -Infinity;
-    for (const s of dash) {
-      if (s.state === 'Dash') dashFrames++;
-      if (s.invulnerable) {
-        if (s.t < iframeFirst) iframeFirst = s.t;
-        if (s.t > iframeLast) iframeLast = s.t;
+    /*
+     * State spans are measured as INTERVAL BOUNDS on simulated time. On a slow
+     * software renderer, several 60 Hz ticks elapse between rAF samples, so the
+     * first sample inside the dash is already ticks late and the last one is
+     * ticks early — a point estimate systematically undershoots (it read a
+     * healthy 0.18 s burst as 0.117). The truth is bracketed instead: the burst
+     * lasted at least (last-in minus first-in) and at most (first-after minus
+     * last-before), and the assertion checks the target lies in that bracket.
+     */
+    const spanBounds = (series, isIn) => {
+      let firstIn = -1;
+      let lastIn = -1;
+      for (let i = 0; i < series.length; i++) {
+        if (isIn(series[i])) {
+          if (firstIn < 0) firstIn = i;
+          lastIn = i;
+        }
       }
-    }
-    const frameStep = dash.length > 1 ? dash[dash.length - 1].t / (dash.length - 1) : 1 / 60;
-    const dashLength = dashFrames * frameStep;
-    const iframeLength = iframeLast > iframeFirst ? iframeLast - iframeFirst + frameStep : 0;
+      if (firstIn < 0) return { lower: 0, upper: 0 };
+      const lower = series[lastIn].e - series[firstIn].e;
+      const before = firstIn > 0 ? series[firstIn - 1].e : series[firstIn].e;
+      const after = lastIn < series.length - 1 ? series[lastIn + 1].e : series[lastIn].e;
+      return { lower, upper: after - before };
+    };
+    const dashBounds = spanBounds(dash, (s) => s.state === 'Dash');
+    const iframeBounds = spanBounds(dash, (s) => s.invulnerable);
+    const dashLength = (dashBounds.lower + dashBounds.upper) / 2;
+    const iframeLength = (iframeBounds.lower + iframeBounds.upper) / 2;
     report.measurements.dashPeakSpeed = dashPeak;
     report.measurements.dashDuration = dashLength;
     report.measurements.iframeDuration = iframeLength;
@@ -470,21 +501,38 @@ async function main() {
     if (dashPeak > DASH_MIN_PEAK) pass('dash peak > 12 u/s', `${dashPeak.toFixed(2)} u/s`);
     else fail('dash peak > 12 u/s', `only ${dashPeak.toFixed(2)} u/s`);
 
-    if (Math.abs(dashLength - DASH_DURATION) <= DASH_DURATION_TOLERANCE) {
-      pass('dash burst ~0.18 s', `${dashLength.toFixed(3)} s`);
+    const dashOk =
+      DASH_DURATION >= dashBounds.lower - 0.017 && DASH_DURATION <= dashBounds.upper + 0.017;
+    if (dashOk) {
+      pass(
+        'dash burst ~0.18 s',
+        `bracketed [${dashBounds.lower.toFixed(3)}, ${dashBounds.upper.toFixed(3)}] s — 0.18 inside`,
+      );
     } else {
-      fail('dash burst ~0.18 s', `${dashLength.toFixed(3)} s, expected 0.18 +/-0.04`);
+      fail(
+        'dash burst ~0.18 s',
+        `bracketed [${dashBounds.lower.toFixed(3)}, ${dashBounds.upper.toFixed(3)}] s — 0.18 outside`,
+      );
     }
 
-    if (Math.abs(iframeLength - DASH_IFRAME) <= 0.05) {
-      pass('dash i-frame ~0.15 s', `${iframeLength.toFixed(3)} s`);
+    const iframeOk =
+      DASH_IFRAME >= iframeBounds.lower - 0.017 && DASH_IFRAME <= iframeBounds.upper + 0.017;
+    if (iframeOk) {
+      pass(
+        'dash i-frame ~0.15 s',
+        `bracketed [${iframeBounds.lower.toFixed(3)}, ${iframeBounds.upper.toFixed(3)}] s — 0.15 inside`,
+      );
     } else {
-      fail('dash i-frame ~0.15 s', `${iframeLength.toFixed(3)} s, expected 0.15 +/-0.05`);
+      fail(
+        'dash i-frame ~0.15 s',
+        `bracketed [${iframeBounds.lower.toFixed(3)}, ${iframeBounds.upper.toFixed(3)}] s — 0.15 outside`,
+      );
     }
 
     // Second dash inside the 1.2 s cooldown must be refused.
     const refusal = await page.evaluate(async (args) => {
       const debug = globalThis.__ARCANUM_DEBUG__;
+      if (typeof debug.killAllEnemies === 'function') debug.killAllEnemies();
       debug.warp(0, 0);
       debug.clearInput();
       debug.press('dash');
@@ -664,8 +712,10 @@ async function main() {
         });
 
       await page.evaluate(() => {
-        globalThis.__ARCANUM_DEBUG__.clearInput();
-        globalThis.__ARCANUM_DEBUG__.warp(0, 0);
+        const d = globalThis.__ARCANUM_DEBUG__;
+        if (typeof d.killAllEnemies === 'function') d.killAllEnemies();
+        d.clearInput();
+        d.warp(0, 0);
       });
       await touch('touchStart', zoneRect.x, zoneRect.y);
       // One move to full deflection, then nothing — a held thumb is silent.
