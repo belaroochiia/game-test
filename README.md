@@ -7,7 +7,7 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 1 — Player moves in the world. Complete, pending device test.**
+> **Status: Phase 1 — Player moves in the world. Complete and device-verified.**
 > Phases 2–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
@@ -165,6 +165,36 @@ numbers — everything else here is real:
 The dash burst and i-frame read slightly short because the sampler counts
 rendered frames, not ticks, so it quantises to the frame interval; the underlying
 timers are 0.18 s and 0.15 s exactly.
+
+**Device-verified** on the 120 Hz Android handset: the joystick walks the
+character, dash reads as a burst rather than a teleport, and the cooldown sweep
+runs. §12's Phase 1 criterion is met.
+
+### The bug the gate let through, and what changed because of it
+
+Phase 1 shipped once with the joystick lighting up but never moving the player.
+`TouchControls` wrote the axes from inside the `pointermove` handler, and a thumb
+resting at full deflection fires no further pointer events — so `KeyboardInput`,
+which runs earlier in the tick order and clears the axes unconditionally, won on
+every subsequent tick. Holding a direction is the normal case, so movement was
+broken for essentially all real input.
+
+The gate passed anyway, for two reasons worth remembering:
+
+- It drove input with `dispatchEvent`, which **bypasses hit-testing entirely**.
+  Synthetic events therefore cannot prove a control is reachable, only that a
+  handler works when called.
+- It asserted on CSS classes — that the stick lit up — instead of on the outcome,
+  that the player moved. Its own output reported `0.10 u/s` and that was not
+  followed up.
+
+`tools/playtest.mjs` now drives real touch through CDP with the thumb **held
+still** after the drag, and asserts outcomes: the player walks, releasing stops
+it, and dash/attack/skill each produce their state change. Reverting the fix
+makes that check fail, so it has teeth.
+
+Rule for later phases: **an input check that never exercises the browser's own
+hit-testing is not a check.** Assert on what the player would notice.
 
 Triangle budget breakdown: terrain 5 000, obstacles 288, avatar 84. Draw calls:
 terrain 1, obstacles 1 (instanced), avatar 7.
