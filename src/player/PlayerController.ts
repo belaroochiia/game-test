@@ -53,7 +53,6 @@ const DASH_DURATION = 0.18;
 const DASH_IFRAME = 0.15;
 const DASH_COOLDOWN = 1.2;
 const COYOTE_TIME = 0.1;
-const ATTACK_DURATION = 0.3;
 
 /**
  * Exponential rates, expressed as time-to-90 %: accelerating in 0.12 s and
@@ -72,6 +71,55 @@ const STEP_UP = 0.5;
 const SLOPE_LIMIT = (45 * Math.PI) / 180;
 /** Downhill push once past the slope limit, so steep faces slide instead of sticking. */
 const SLIDE_ACCEL = 16;
+
+/**
+ * §9's light-light-heavy combo. Startup/active/recovery per stage; the buffered
+ * next input may cancel into the following stage once the active phase ends, and
+ * §7's 0.12 s input buffer means a slightly-early tap still chains. All timing
+ * is measured by tools/combattest.mjs — these are contract numbers, not taste.
+ */
+interface AttackStageDef {
+  readonly startup: number;
+  readonly active: number;
+  readonly recovery: number;
+  readonly base: number;
+  readonly radius: number;
+  readonly reach: number;
+  readonly heavy: boolean;
+  readonly knockback: number;
+}
+
+const ATTACK_STAGES: readonly AttackStageDef[] = [
+  { startup: 0.08, active: 0.1, recovery: 0.22, base: 12, radius: 1.1, reach: 1.0, heavy: false, knockback: 2.5 },
+  { startup: 0.07, active: 0.1, recovery: 0.26, base: 14, radius: 1.1, reach: 1.0, heavy: false, knockback: 3 },
+  { startup: 0.16, active: 0.12, recovery: 0.42, base: 26, radius: 1.3, reach: 1.1, heavy: true, knockback: 9 },
+];
+
+/*
+ * §9 asks for a 0.9 s combo-reset window; here the chain window IS the cancel
+ * window (active-end to recovery-end), which is stricter and reads cleaner: a
+ * press after recovery always restarts at stage 1, so there is no hidden timer
+ * for the player to build a wrong model around.
+ */
+/** Post-hit invulnerability, so contact damage cannot melt the player (§9). */
+const HIT_IFRAME_SECONDS = 0.6;
+const HIT_STAGGER_SECONDS = 0.25;
+const DOWN_SECONDS = 1.6;
+/** Chest height, where the swing sphere lives. */
+const STRIKE_HEIGHT = 1.0;
+
+/** The strike callback the bootstrap wires to the hitbox system. */
+export type StrikeHandler = (
+  stage: number,
+  x: number,
+  y: number,
+  z: number,
+  radius: number,
+  base: number,
+  heavy: boolean,
+  knockX: number,
+  knockZ: number,
+) => void;
 
 // Module-scope scratch — §13's number-one rule is no allocation in update().
 const scratchNormal = new THREE.Vector3();
@@ -99,9 +147,23 @@ export class PlayerController implements System {
   private airTime = 0;
   private dashTimer = 0;
   private dashCooldown = 0;
-  private attackTimer = 0;
   private dashDirX = 0;
   private dashDirZ = -1;
+
+  /** 0 = not attacking, 1..3 = current swing. */
+  private comboStageValue = 0;
+  private attackTimer = 0;
+  private struckThisSwing = false;
+  private hitTimer = 0;
+  private iframeTimer = 0;
+  private downTimer = 0;
+
+  /** Wired by the bootstrap: the swing's active frame reports here (Phase 3). */
+  onStrike: StrikeHandler | undefined;
+  /** Auto-aim yaw from TargetLock; NaN when nothing is locked (§6.6). */
+  aimYaw = Number.NaN;
+  /** Set by the bootstrap; combat freezes during hitstop while the world runs. */
+  hitstopRef: { readonly active: boolean } | undefined;
 
   /** Ground height found this tick, including prop tops. */
   private groundY = 0;
@@ -157,13 +219,41 @@ export class PlayerController implements System {
   }
 
   update(dt: number): void {
+    // Frozen mid-hit: no timers advance, no input consumes. The camera and the
+    // world keep running — the contrast is what sells the impact (§9).
+    if (this.hitstopRef !== undefined && this.hitstopRef.active) return;
+
     this.prevPosition.copy(this.position);
 
     const input = this.input;
     const now = performance.now();
 
     if (this.dashCooldown > 0) this.dashCooldown -= dt;
-    if (this.attackTimer > 0) this.attackTimer -= dt;
+    if (this.iframeTimer > 0) this.iframeTimer -= dt;
+
+    // --- down / hit interrupts own everything below them ---------------------
+    if (this.currentState === PLAYER_STATE.Down) {
+      this.downTimer -= dt;
+      this.velocity.x = 0;
+      this.velocity.z = 0;
+      if (this.downTimer <= 0) this.respawn();
+      this.resolveGround();
+      return;
+    }
+    if (this.currentState === PLAYER_STATE.Hit) {
+      this.hitTimer -= dt;
+      // Knockback decays hard; no steering while staggered.
+      const decay = 1 - Math.exp(-8 * dt);
+      this.velocity.x -= this.velocity.x * decay;
+      this.velocity.z -= this.velocity.z * decay;
+      this.position.x += this.velocity.x * dt;
+      this.position.z += this.velocity.z * dt;
+      this.clampToChunk();
+      this.resolveProps();
+      this.resolveGround();
+      if (this.hitTimer <= 0) this.currentState = PLAYER_STATE.Idle;
+      return;
+    }
 
     // --- resolve the stick into a world-space direction (camera-relative, §6) ---
     let inX = input.moveX;
@@ -186,21 +276,42 @@ export class PlayerController implements System {
       wishZ = -inX * sin + inZ * cos;
     }
 
+    // --- attack combo (§9) ---------------------------------------------------
+    const attacking = this.comboStageValue > 0;
+    if (attacking) this.stepAttack(dt, now);
+
     // --- dash: buffered input (§7's 0.12 s) plus coyote time -----------------
+    // Dash cancels an attack, but only once the active frames are done — §9's
+    // cancel window. Cancelling startup would make the heavy free to whiff-test.
     const canCoyoteDash = this.isGrounded || this.airTime < COYOTE_TIME;
+    const inCancelWindow = !attacking || this.attackPhase() === 2;
     const dashRequested = consumeBuffered(input, 'dashQueuedAt', now);
-    if (dashRequested && this.dashCooldown <= 0 && canCoyoteDash && this.currentState !== PLAYER_STATE.Dash) {
+    if (
+      dashRequested &&
+      this.dashCooldown <= 0 &&
+      canCoyoteDash &&
+      inCancelWindow &&
+      this.currentState !== PLAYER_STATE.Dash
+    ) {
+      this.cancelAttack();
       this.startDash(wishX, wishZ, hasInput);
     }
 
-    const attackRequested = consumeBuffered(input, 'attackQueuedAt', now);
-    if (attackRequested && this.currentState !== PLAYER_STATE.Dash && this.attackTimer <= 0) {
-      // Phase 3 replaces this stub with the real 3-hit combo (§9).
-      this.attackTimer = ATTACK_DURATION;
+    // A press starts the combo; chaining is handled inside stepAttack, which
+    // leaves the buffered press unconsumed until its cancel window opens.
+    if (!attacking && this.currentState !== PLAYER_STATE.Dash && this.isGrounded) {
+      const attackRequested = consumeBuffered(input, 'attackQueuedAt', now);
+      if (attackRequested) this.startAttack(1);
     }
 
     // --- horizontal velocity ------------------------------------------------
-    if (this.currentState === PLAYER_STATE.Dash) {
+    if (this.comboStageValue > 0) {
+      // Rooted during a swing: velocity bleeds off fast, no steering. Facing may
+      // still snap to the lock (handled in startAttack), which is §6.6's auto-aim.
+      const decay = 1 - Math.exp(-14 * dt);
+      this.velocity.x -= this.velocity.x * decay;
+      this.velocity.z -= this.velocity.z * decay;
+    } else if (this.currentState === PLAYER_STATE.Dash) {
       this.dashTimer -= dt;
       this.velocity.x = this.dashDirX * DASH_SPEED;
       this.velocity.z = this.dashDirZ * DASH_SPEED;
@@ -259,6 +370,12 @@ export class PlayerController implements System {
     this.dashTimer = 0;
     this.dashCooldown = 0;
     this.attackTimer = 0;
+    this.comboStageValue = 0;
+    this.struckThisSwing = false;
+    this.hitTimer = 0;
+    this.iframeTimer = 0;
+    this.downTimer = 0;
+    this.aimYaw = Number.NaN;
     this.dashDirX = 0;
     this.dashDirZ = -1;
     this.groundY = y;
@@ -453,8 +570,16 @@ export class PlayerController implements System {
       return;
     }
 
-    if (this.attackTimer > 0) {
+    if (this.comboStageValue === 1) {
       this.currentState = PLAYER_STATE.Attack1;
+      return;
+    }
+    if (this.comboStageValue === 2) {
+      this.currentState = PLAYER_STATE.Attack2;
+      return;
+    }
+    if (this.comboStageValue === 3) {
+      this.currentState = PLAYER_STATE.Attack3;
       return;
     }
 
@@ -463,6 +588,131 @@ export class PlayerController implements System {
       return;
     }
     this.currentState = PLAYER_STATE.Idle;
+  }
+
+  // --- attack combo internals (§9) -----------------------------------------
+
+  /** 0 = startup, 1 = active, 2 = recovery (cancel window). */
+  private attackPhase(): number {
+    const def = ATTACK_STAGES[this.comboStageValue - 1];
+    if (def === undefined) return 2;
+    if (this.attackTimer < def.startup) return 0;
+    if (this.attackTimer < def.startup + def.active) return 1;
+    return 2;
+  }
+
+  private startAttack(stage: number): void {
+    const def = ATTACK_STAGES[stage - 1];
+    if (def === undefined) return;
+    this.comboStageValue = stage;
+    this.attackTimer = 0;
+    this.struckThisSwing = false;
+    // §6.6 auto-aim: snap facing to the locked target at swing start. NaN means
+    // no lock, keep the current facing.
+    if (!Number.isNaN(this.aimYaw)) this.facing = this.aimYaw;
+  }
+
+  private cancelAttack(): void {
+    this.comboStageValue = 0;
+    this.attackTimer = 0;
+  }
+
+  private stepAttack(dt: number, now: number): void {
+    const def = ATTACK_STAGES[this.comboStageValue - 1];
+    if (def === undefined) {
+      this.cancelAttack();
+      return;
+    }
+    this.attackTimer += dt;
+
+    // Strike exactly once, at the first tick inside the active phase.
+    if (!this.struckThisSwing && this.attackTimer >= def.startup) {
+      this.struckThisSwing = true;
+      const strike = this.onStrike;
+      if (strike !== undefined) {
+        const sin = Math.sin(this.facing);
+        const cos = Math.cos(this.facing);
+        strike(
+          this.comboStageValue,
+          this.position.x + sin * def.reach,
+          this.position.y + STRIKE_HEIGHT,
+          this.position.z - cos * def.reach,
+          def.radius,
+          def.base,
+          def.heavy,
+          sin * def.knockback,
+          -cos * def.knockback,
+        );
+      }
+    }
+
+    const total = def.startup + def.active + def.recovery;
+    const activeDone = this.attackTimer >= def.startup + def.active;
+
+    // §9's cancel window: a buffered press chains to the next stage once the
+    // active phase ends. consumeBuffered only fires within §7's 0.12 s window,
+    // so a press made mid-swing still needs to be recent — mashing works, one
+    // early tap two swings ago does not.
+    if (activeDone && this.comboStageValue < ATTACK_STAGES.length) {
+      if (consumeBuffered(this.input, 'attackQueuedAt', now)) {
+        this.startAttack(this.comboStageValue + 1);
+        return;
+      }
+    }
+
+    if (this.attackTimer >= total) this.cancelAttack();
+  }
+
+  // --- damage intake (Combatant, wired by the bootstrap) --------------------
+
+  /** True while dash i-frames or post-hit i-frames are live. */
+  get damageImmune(): boolean {
+    return this.invulnerable || this.iframeTimer > 0;
+  }
+
+  get comboStage(): number {
+    return this.comboStageValue;
+  }
+
+  get iframesLeft(): number {
+    return this.iframeTimer;
+  }
+
+  /**
+   * Applies already-mitigated damage. Returns what was applied — 0 while immune,
+   * which is how dash-through-the-strike works (§9's i-frame promise).
+   */
+  applyDamage(amount: number, knockX: number, knockZ: number): number {
+    if (!this.alive || this.damageImmune) return 0;
+    this.stats.damage(amount);
+    this.iframeTimer = HIT_IFRAME_SECONDS;
+    this.cancelAttack();
+    if (this.stats.hp <= 0) {
+      this.currentState = PLAYER_STATE.Down;
+      this.downTimer = DOWN_SECONDS;
+      this.velocity.set(0, 0, 0);
+      return amount;
+    }
+    this.currentState = PLAYER_STATE.Hit;
+    this.hitTimer = HIT_STAGGER_SECONDS;
+    this.velocity.x = knockX;
+    this.velocity.z = knockZ;
+    return amount;
+  }
+
+  get alive(): boolean {
+    return this.currentState !== PLAYER_STATE.Down;
+  }
+
+  private respawn(): void {
+    this.stats.reset();
+    const y = this.terrain.heightAt(this.spawnX, this.spawnZ);
+    this.position.set(this.spawnX, y, this.spawnZ);
+    this.prevPosition.copy(this.position);
+    this.velocity.set(0, 0, 0);
+    this.currentState = PLAYER_STATE.Idle;
+    this.iframeTimer = HIT_IFRAME_SECONDS;
+    this.cancelAttack();
   }
 
   /** Mana and health live in PlayerStats; exposed here for the UI's convenience. */

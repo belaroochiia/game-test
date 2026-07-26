@@ -94,6 +94,9 @@ export class BlockyAvatar implements Avatar {
   private clock = 0;
   private lastNow = 0;
   private lean = 0;
+  /** Seconds since the current attack state was entered; drives the swing pose. */
+  private attackClock = 0;
+  private lastState: PlayerState = PLAYER_STATE.Idle;
 
   constructor() {
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
@@ -193,6 +196,69 @@ export class BlockyAvatar implements Avatar {
     const moving = speed > 0.25;
     const sprinting = state.state === PLAYER_STATE.Sprint;
     const dashing = state.state === PLAYER_STATE.Dash;
+
+    if (state.state !== this.lastState) {
+      this.attackClock = 0;
+      this.lastState = state.state;
+    } else {
+      this.attackClock += frameDt;
+    }
+
+    // Attack poses (§9): wall-time is fine here — the swing is 0.4 s of pure
+    // presentation and never moves the feet, so nothing can skate.
+    const stage =
+      state.state === PLAYER_STATE.Attack1
+        ? 1
+        : state.state === PLAYER_STATE.Attack2
+          ? 2
+          : state.state === PLAYER_STATE.Attack3
+            ? 3
+            : 0;
+    if (stage > 0) {
+      // Wind up briefly, then whip through: a two-part curve reads as a swing
+      // even on 6 boxes. Stage 2 mirrors; stage 3 is both arms overhead.
+      const t = this.attackClock;
+      const wind = Math.min(1, t / 0.08);
+      const through = t <= 0.08 ? 0 : Math.min(1, (t - 0.08) / 0.14);
+      const swing = -0.9 * wind + 2.1 * through;
+      if (stage === 1) {
+        this.armRight.rotation.x = -1.2 + swing;
+        this.armLeft.rotation.x = 0.25 - through * 0.4;
+      } else if (stage === 2) {
+        this.armLeft.rotation.x = -1.2 + swing;
+        this.armRight.rotation.x = 0.25 - through * 0.4;
+      } else {
+        this.armLeft.rotation.x = -2.2 + swing * 1.15;
+        this.armRight.rotation.x = -2.2 + swing * 1.15;
+      }
+      this.torso.rotation.x = 0.12 + through * 0.14;
+      this.legLeft.rotation.x = 0.18;
+      this.legRight.rotation.x = -0.18;
+      this.body.position.y = 0;
+      return;
+    }
+
+    if (state.state === PLAYER_STATE.Hit) {
+      // Recoil: torso thrown back, arms up. Held for the stagger's 0.25 s.
+      this.torso.rotation.x = -0.32;
+      this.armLeft.rotation.x = -0.7;
+      this.armRight.rotation.x = -0.7;
+      this.legLeft.rotation.x = -0.12;
+      this.legRight.rotation.x = 0.2;
+      this.body.position.y = 0;
+      return;
+    }
+
+    if (state.state === PLAYER_STATE.Down) {
+      // Collapsed: the whole body pitches to the ground plane.
+      this.torso.rotation.x = 1.35;
+      this.armLeft.rotation.x = 0.5;
+      this.armRight.rotation.x = 0.5;
+      this.legLeft.rotation.x = 1.2;
+      this.legRight.rotation.x = 1.1;
+      this.body.position.y = -0.55;
+      return;
+    }
 
     let targetLean = 0;
     if (dashing) targetLean = 0.42;
