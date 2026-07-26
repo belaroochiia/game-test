@@ -7,7 +7,7 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 4 — The Grimoire. Complete, pending device test.**
+> **Status: Phase 4 — The Grimoire. Complete and device-verified.**
 > Phases 5–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
@@ -154,6 +154,11 @@ multiplier unobservable — see below).
 | Fusion | consumes inputs, result learned, ACQUIRED card in the DOM |
 | Soul orb loop | real CDP hold on the morphed ✋ button: orb → 1.2 s → card + 19-tick freeze + known+1 |
 | Budgets in a 4-skill brawl | 48 draws, 67 k tris, **0 B/frame** |
+
+**Device-verified** on the 120 Hz Android handset: all four starters cast with
+real JSON costs, reactions fire with their floating names, the soul-orb absorb
+and the SKILL ACQUIRED moment land as designed, the Grimoire screen works under
+thumbs, and budgets hold in a full skill brawl. §12's Phase 4 criterion is met.
 
 The gate found four real product bugs before they reached a phone: debug-spawned
 slimes had no status boards; the hitbox registry's 19 slots were never recycled
