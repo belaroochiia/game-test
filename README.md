@@ -7,7 +7,7 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 2 — The world feels alive. Complete, pending device test.**
+> **Status: Phase 2 — The world feels alive. Complete and device-verified.**
 > Phases 3–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
@@ -157,6 +157,10 @@ biome boundary, and samples every frame. **38/38 checks pass.**
 | Sky dome | 1 draw call, constant | 1 |
 | Prop instances / colliders | 354 / 238 | — |
 | Heap | 3.8 MB peak | ≤ 280 |
+
+**Device-verified** on the 120 Hz Android handset: the biome traverse streams
+without stutter, draws/tris stay inside budget on the overlay, no popping at the
+boundary, and the day-night cycle runs. §12's Phase 2 criterion is met.
 
 Draw calls came in at 30 against a budget of 110 because of the one deliberate
 deviation from §3 (below). Triangles at 67 k of 150 k is the LOD scheme working:
