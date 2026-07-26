@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-ssr/
+artifacts/
+*.local
+.DS_Store
+.vite/
+*.log
+npm-debug.log*
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,22 @@
+{
+  "name": "arcanum-drift",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Arcanum Drift — mini open-world 3D, medieval magic, mobile-first WebGL",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node tools/smoke.mjs"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
+  }
+}

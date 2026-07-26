@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Arcanum Drift</title>
+
+    <!-- viewport-fit=cover + safe-area padding in CSS: notches must not eat the HUD (§6) -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0a0d14" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Arcanum Drift — mini open-world medieval magic, built for phones." />
+
+    <!-- Standalone/PWA-ish hints so the browser chrome stops stealing vertical space -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/styles/main.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game-canvas"></canvas>
+
+      <!-- All UI is DOM on top of the canvas, never rendered inside WebGL (§2, §13) -->
+      <div id="ui-root" class="ui-root"></div>
+
+      <button id="btn-debug" class="hud-btn hud-btn--debug" type="button" aria-pressed="true">
+        DBG
+      </button>
+
+      <div id="boot" class="boot" role="status">
+        <div class="boot__mark"></div>
+        <h1 class="boot__title">ARCANUM DRIFT</h1>
+        <p class="boot__sub">Phase 0 — Foundation</p>
+        <p class="boot__msg" id="boot-msg">initialising renderer…</p>
+      </div>
+
+      <div id="rotate-hint" class="rotate-hint" aria-hidden="true">
+        Landscape recommended — rotate your device
+      </div>
+    </div>
+
+    <noscript>
+      <p style="color: #e8e6df; font: 14px system-ui; padding: 24px">
+        Arcanum Drift needs JavaScript and WebGL 2.
+      </p>
+    </noscript>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
