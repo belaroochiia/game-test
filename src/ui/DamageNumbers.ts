@@ -70,7 +70,7 @@ const CSS =
   'font-variant-numeric:tabular-nums;letter-spacing:.02em;white-space:nowrap;' +
   'color:#f5f2e9;text-shadow:0 1px 0 rgba(0,0,0,.85),0 0 6px rgba(0,0,0,.55);' +
   'will-change:transform,opacity;}\n' +
-  '.dmg--heavy{font-size:21px;color:#ffb45e;}\n' +
+  '.dmg--react{color:#8ff2d8;font-size:13px;letter-spacing:.08em;font-weight:700}.dmg--heavy{font-size:21px;color:#ffb45e;}\n' +
   '.dmg--crit{font-size:25px;color:#ffe36b;' +
   'text-shadow:0 1px 0 rgba(0,0,0,.9),0 0 10px rgba(255,170,40,.45);}\n';
 
@@ -166,6 +166,47 @@ export class DamageNumbers implements System {
    * slot, or — pool exhausted — recycles the oldest live number mid-flight
    * rather than allocating (§13).
    */
+  /**
+   * §8.5's reaction names: same pool, same motion, distinct class. The text is a
+   * short-lived string at event rate, not frame rate, so it does not violate §13.
+   */
+  spawnText(x: number, y: number, z: number, text: string): void {
+    if (this.layer === undefined) return;
+
+    const entries = this.entries;
+    let slot: NumberEntry | undefined;
+    let oldest: NumberEntry | undefined;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry === undefined) continue;
+      if (!entry.live) {
+        slot = entry;
+        break;
+      }
+      if (oldest === undefined || entry.seq < oldest.seq) oldest = entry;
+    }
+    if (slot === undefined) slot = oldest;
+    if (slot === undefined) return;
+
+    if (!slot.live) this.liveCount++;
+    if (!slot.shown) this.shownCount++;
+    slot.live = true;
+    slot.shown = true;
+    slot.age = 0;
+    slot.seq = this.nextSeq++;
+    slot.wx = x;
+    slot.wy = y;
+    slot.wz = z;
+    slot.keyX = KEY_NONE;
+    slot.keyY = KEY_NONE;
+    slot.opacityStep = -1;
+    slot.text.nodeValue = text;
+    // Poison the caches: the next numeric spawn on this slot must rewrite both.
+    slot.shownValue = Number.NaN;
+    slot.classIndex = -1;
+    slot.el.className = 'dmg dmg--react is-live';
+  }
+
   spawn(x: number, y: number, z: number, amount: number, crit: boolean, heavy: boolean): void {
     if (this.layer === undefined) return;
 

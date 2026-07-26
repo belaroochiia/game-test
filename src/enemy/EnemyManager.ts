@@ -38,6 +38,12 @@ export interface FreezeSource {
   isFrozen(c: { readonly id: number }): boolean;
 }
 
+/** Phase 4: status-board lifecycle, so spawned enemies can carry statuses. */
+export interface BoardSource {
+  register(c: Combatant): void;
+  unregister(c: Combatant): void;
+}
+
 /** §9's cheap AI stagger: past this distance, brains step every 6th tick. */
 const BRAIN_NEAR_DIST = 30;
 const BRAIN_TICK_STRIDE = 6;
@@ -84,6 +90,7 @@ export class EnemyManager implements System {
 
   /** Phase 4 wiring; null until the bootstrap sets it. */
   freezeRef: FreezeSource | null = null;
+  boardsRef: BoardSource | null = null;
 
   /** Stable array — TargetLock iterates it; never reallocated per frame. */
   readonly enemies: EnemyBase[] = [];
@@ -113,8 +120,44 @@ export class EnemyManager implements System {
     this.hitstop = options.hitstop;
   }
 
+  /** §9's hard cap on concurrently active enemies. */
+  static readonly MAX_ENEMIES = 18;
+
+  /**
+   * Removes dead enemies entirely: hitbox slot released, mesh out of the scene,
+   * disposed, compacted out of the array. Spawning past the cap without this
+   * exhausted HitboxSystem's fixed slots — corpses held them forever.
+   */
+  purgeDead(): number {
+    const enemies = this.enemies;
+    let write = 0;
+    let purged = 0;
+    for (let i = 0; i < enemies.length; i++) {
+      const enemy = enemies[i];
+      if (enemy === undefined) continue;
+      if (!enemy.alive) {
+        this.hitbox.unregister(enemy);
+        if (this.boardsRef !== null) this.boardsRef.unregister(enemy);
+        this.scene.remove(enemy.root);
+        enemy.dispose();
+        purged++;
+        continue;
+      }
+      enemies[write] = enemy;
+      write++;
+    }
+    enemies.length = write;
+    return purged;
+  }
+
   /** Test spawner: N slimes ringed around a point. SpawnDirector replaces in Phase 5. */
   spawnSlimes(centerX: number, centerZ: number, count: number, ringRadius: number): void {
+    // Reclaim slots first, then respect §9's cap. A spawner that can exhaust
+    // the hitbox registry is a bug factory in every later phase.
+    this.purgeDead();
+    const room = EnemyManager.MAX_ENEMIES - this.enemies.length;
+    if (count > room) count = room;
+    if (count <= 0) return;
     const field = this.field;
     const minX = field.minX + SPAWN_MARGIN;
     const maxX = field.maxX - SPAWN_MARGIN;
@@ -139,6 +182,7 @@ export class EnemyManager implements System {
       });
       this.scene.add(slime.root);
       this.hitbox.register(slime);
+      if (this.boardsRef !== null) this.boardsRef.register(slime);
       this.enemies.push(slime);
     }
   }

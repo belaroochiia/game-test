@@ -7,8 +7,8 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 3 — Core combat. Complete and device-verified.**
-> Phases 4–7 are not started. Do not add features from a later phase before the
+> **Status: Phase 4 — The Grimoire. Complete, pending device test.**
+> Phases 5–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
 ## Stack
@@ -136,6 +136,41 @@ tools/
 4. Lock the screen and unlock it, or switch tabs and come back: the loop pauses
    while hidden and resumes without fast-forwarding (the cube must not jump).
 5. Rotate the device: the canvas re-fits with no stretching and no black bars.
+
+## Measured — Phase 4 (headless gate)
+
+`npm run skilltest` proves §12's acceptance criterion in executable form.
+**78 checks pass, 0 fail** (plus honest NOTEs where shipped balance makes a
+multiplier unobservable — see below).
+
+| Proven | How |
+|---|---|
+| **§4.1's law: zero skill ids in TS** | node-side grep of 11 ids × 43 .ts files: zero hits; the starting loadout lives in `data/loadout.json` |
+| Every skill driven by JSON alone | one loop over the registry: learn → equip → cast → assert mana/cooldown/damage/heal/status/delivery shape from the JSON fields |
+| Reactions | Conflagration, Shatter (fires through the **melee** path), Deep Freeze, Overload chain, Thermal Shock — seeded |
+| Refusals | cooldown / mana / busy, with the button sweep decreasing |
+| Mastery | level flips exactly at `masteryCurve[1]`; damage bonus measured **with statScaling dilution accounted for** (mastery multiplies base only) |
+| Resonance | 3× fire = +15 % same-seed delta; 4 elements = versatile status bonus |
+| Fusion | consumes inputs, result learned, ACQUIRED card in the DOM |
+| Soul orb loop | real CDP hold on the morphed ✋ button: orb → 1.2 s → card + 19-tick freeze + known+1 |
+| Budgets in a 4-skill brawl | 48 draws, 67 k tris, **0 B/frame** |
+
+The gate found four real product bugs before they reached a phone: debug-spawned
+slimes had no status boards; the hitbox registry's 19 slots were never recycled
+(after ~19 lifetime spawns nothing was hittable); `combat:reaction` floating
+text was unwired; and the melee path never consulted `reactionFor`, which made
+Shatter — a §8.5 reaction — unreachable. All fixed and re-proven.
+
+**Balance debt, recorded not hidden**: several §8.5 multipliers are real in code
+but unobservable against the only Phase 4 enemy — a 40 hp, 0-armor slime dies
+before Shatter's ×3 or a status can be read. Phase 5's tougher, armored enemies
+are what make that content visible; the gate NOTEs each case instead of
+green-lighting an untested claim.
+
+Deviations worth knowing: element list is 7, not §8.1's 6 — §8.5's Wet reactions
+are unreachable without a water applier. `masteryBonus` is machine-readable
+rather than §8.1's prose. Conflagration is single-target for now (§8.5 says
+area). Channeling is supported by the schema but unused by the starter nine.
 
 ## Measured — Phase 3 (headless gate)
 

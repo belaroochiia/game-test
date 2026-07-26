@@ -325,6 +325,9 @@ interface ArcanumDebug {
   setStatusSeed(n: number): void;
   setOrbSeed(n: number): void;
   fuse(a: string, b: string): string | null;
+  grantUses(id: string, count: number): void;
+  refillMana(): void;
+  setEnemyHp(enemyId: number, hp: number): void;
   orbs(): { count: number; nearby: boolean; absorbProgress: number };
   forceAbsorb(active: boolean): void;
   grimoireScreen(): { open: boolean };
@@ -553,19 +556,26 @@ function main(): void {
   let strikeKnockX = 0;
   let strikeKnockZ = 0;
   const onStrikeHit = (target: Combatant): void => {
-    const armor = target instanceof EnemyBase ? target.def.armor : 0;
+    let armor = target instanceof EnemyBase ? target.def.armor : 0;
+    // §8.5: melee is physical — a frozen target Shatters. The element argument
+    // is unused on the physical path ('earth' is the §8.5 pairing anyway).
+    const reactionMult = status.reactionFor(target, 'earth', true);
+    const heavy = strikeHeavy || status.lastReactionHeavy;
+    if (armor > 0 && status.armorBroken(target)) armor *= 0.5;
     damage.deal(
       target,
       strikeBase,
       meleeScaling(),
       armor,
-      strikeHeavy,
+      heavy,
       1,
       strikeKnockX,
       strikeKnockZ,
       target.position.x,
       target.position.y + target.height * 0.7,
       target.position.z,
+      1,
+      reactionMult,
     );
   };
   player.onStrike = (_stage, x, y, z, radius, base, heavy, knockX, knockZ) => {
@@ -632,16 +642,21 @@ function main(): void {
     }
   });
 
-  // Status boards for everything that fights. Enemies register as they spawn;
-  // Phase 4's fixed camp registers here, and spawnSlimes via debug re-registers.
-  const registerEnemyBoards = (): void => {
+  // Status boards follow enemy lifecycle: registered on spawn, released on
+  // purge. The camp spawned before this wiring existed, so sweep it once.
+  enemies.boardsRef = status;
+  {
     const all = enemies.enemies;
     for (let i = 0; i < all.length; i++) {
       const enemy = all[i];
       if (enemy !== undefined) status.register(enemy);
     }
-  };
-  registerEnemyBoards();
+  }
+
+  // §8.5's reaction names as floating text, in the reaction's own colour class.
+  engine.bus.on('combat:reaction', (event) => {
+    damageNumbers.spawnText(event.x, event.y, event.z, event.name);
+  });
 
   // Build the spawn neighbourhood before the first frame, behind the loading
   // screen — this is the one place a build burst is allowed (§12: no stutter).
@@ -944,6 +959,16 @@ function main(): void {
       setOrbSeed(n);
     },
     fuse: (a: string, b: string) => grimoire.fuse(a, b),
+    grantUses: (id: string, count: number) => {
+      for (let i = 0; i < count; i++) grimoire.registerUse(id);
+    },
+    refillMana: () => {
+      stats.mana = stats.maxMana;
+    },
+    setEnemyHp: (enemyId: number, hp: number) => {
+      const enemy = findEnemyById(enemyId);
+      if (enemy !== undefined && enemy.alive) enemy.hp = hp;
+    },
     orbs: () => ({
       count: orbs.liveOrbCount,
       nearby: orbs.nearbyOrb,
