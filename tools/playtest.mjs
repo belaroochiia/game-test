@@ -330,7 +330,11 @@ async function main() {
     if (response === null || !response.ok()) throw new Fatal(`page load failed (${response?.status()})`);
     pass('page loaded', `HTTP ${response.status()}`);
 
-    await page.waitForFunction(() => globalThis.__ARCANUM_DEBUG__ !== undefined, { timeout: 15_000 });
+    // Options go in the THIRD slot; the second is the arg passed to the predicate.
+    // Passing {timeout} as the arg silently falls back to Playwright's 30 s default.
+    await page.waitForFunction(() => globalThis.__ARCANUM_DEBUG__ !== undefined, null, {
+      timeout: 15_000,
+    });
     const shape = await page.evaluate(() => {
       const d = globalThis.__ARCANUM_DEBUG__;
       const needed = ['setInput', 'clearInput', 'press', 'player', 'camera', 'terrainHeightAt', 'warp'];
@@ -341,7 +345,9 @@ async function main() {
     }
     pass('__ARCANUM_DEBUG__ shape', `complete, version ${shape.version}`);
 
-    await page.waitForFunction(() => globalThis.__ARCANUM_DEBUG__.frameCount() > 40, { timeout: 15_000 });
+    await page.waitForFunction(() => globalThis.__ARCANUM_DEBUG__.frameCount() > 40, null, {
+      timeout: 15_000,
+    });
     pass('render loop running', 'frameCount passed 40');
 
     // --- 3. walk speed ----------------------------------------------------
@@ -730,9 +736,14 @@ async function main() {
       });
       await sleep(120);
 
-      // Dash: sample while it is happening, not after it has ended.
-      await tap(buttonProbe.dash);
-      const dashByTouch = await page.evaluate(async () => {
+      /*
+       * Start sampling BEFORE the tap and await it afterwards. Tapping first and
+       * then opening a second CDP round trip to begin sampling loses the race on a
+       * heavy page: the dash lasts 0.18 s, and the round trip can exceed that, so
+       * the burst is over before the first sample lands. That produced a false
+       * failure once, with the cooldown proving the dash had in fact fired.
+       */
+      const dashSampler = page.evaluate(async () => {
         const debug = globalThis.__ARCANUM_DEBUG__;
         let peakSpeed = 0;
         let sawDash = false;
@@ -742,13 +753,15 @@ async function main() {
             const p = debug.player();
             if (p.speed > peakSpeed) peakSpeed = p.speed;
             if (p.state === 'Dash') sawDash = true;
-            if (performance.now() - started > 400) resolve();
+            if (performance.now() - started > 1200) resolve();
             else requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
         });
         return { peakSpeed, sawDash, cooldown: debug.player().dashCooldownLeft };
       });
+      await tap(buttonProbe.dash);
+      const dashByTouch = await dashSampler;
       report.measurements.dashByTouchPeak = dashByTouch.peakSpeed;
       if (dashByTouch.sawDash && dashByTouch.peakSpeed > DASH_MIN_PEAK) {
         pass('dash button responds to real touch', `peak ${dashByTouch.peakSpeed.toFixed(2)} u/s, state reached Dash`);
@@ -760,22 +773,24 @@ async function main() {
       }
 
       // Attack: a 0.3 s Attack1 stub until Phase 3, but the state must change.
+      // Same start-sampler-first ordering as the dash, for the same reason.
       await sleep(500);
-      await tap(buttonProbe.attack);
-      const attackByTouch = await page.evaluate(async () => {
+      const attackSampler = page.evaluate(async () => {
         const debug = globalThis.__ARCANUM_DEBUG__;
         let sawAttack = false;
         const started = performance.now();
         await new Promise((resolve) => {
           const tick = () => {
             if (debug.player().state === 'Attack1') sawAttack = true;
-            if (performance.now() - started > 300) resolve();
+            if (performance.now() - started > 1200) resolve();
             else requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
         });
         return sawAttack;
       });
+      await tap(buttonProbe.attack);
+      const attackByTouch = await attackSampler;
       if (attackByTouch) pass('attack button responds to real touch', 'state reached Attack1');
       else fail('attack button responds to real touch', 'state never reached Attack1');
 

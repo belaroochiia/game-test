@@ -4,9 +4,13 @@ import { Engine, WebGL2UnsupportedError } from './core/Engine';
 import type { System } from './core/Engine';
 import type { ProfilerMetrics } from './core/Profiler';
 
-import { TerrainGen } from './world/TerrainGen';
+import { HeightField, SEA_LEVEL } from './world/HeightField';
+import { BiomeTable, createBiomeSample } from './world/BiomeTable';
 import { SpatialHash } from './world/SpatialHash';
-import type { AABB } from './world/SpatialHash';
+import { ChunkManager } from './world/ChunkManager';
+import { PropScatter } from './world/PropScatter';
+import { SkyDayNight } from './world/SkyDayNight';
+import { Water } from './world/Water';
 
 import { createInputState } from './player/InputState';
 import { PlayerStats } from './player/PlayerStats';
@@ -23,84 +27,26 @@ import { HUD } from './ui/HUD';
 import './styles/game-ui.css';
 
 /**
- * Phase 1 bootstrap (CLAUDE.md §12): one terrain chunk, a blocky procedural
- * player that walks/sprints/dashes under thumb control, and a collision-aware
- * third-person camera.
+ * Phase 2 bootstrap (CLAUDE.md §12): a streamed 600x600 world of two biomes with
+ * LOD, instanced props, a 12-minute day-night cycle, and water.
  *
- * Not here yet, on purpose: chunk streaming, LOD, prop scattering, day/night,
- * water (Phase 2), combat and enemies (Phase 3), skills (Phase 4).
+ * Not here yet, on purpose: combat and enemies (Phase 3), skills (Phase 4),
+ * shrines and bosses (Phase 5), progression and save (Phase 6).
  */
 
-const VERSION = '0.2.0-phase1';
+const VERSION = '0.3.0-phase2';
 
-const TERRAIN_SEED = 1337;
-/** Deterministic test obstacles so §7's prop push-out is verifiable before PropScatter exists. */
-const OBSTACLE_COUNT = 24;
-
-// ---------------------------------------------------------------------------
-// Test obstacles — Phase 2's PropScatter replaces this wholesale
-// ---------------------------------------------------------------------------
-
-const obstacleMatrix = new THREE.Matrix4();
-const obstacleQuat = new THREE.Quaternion();
-const obstacleScale = new THREE.Vector3();
-const obstaclePos = new THREE.Vector3();
-const obstacleBox: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
+const WORLD_SEED = 1337;
 
 /**
- * A single InstancedMesh of boxes (§3: one instanced mesh per prop type), each
- * registered in the spatial hash. Deterministic from a seeded LCG so the layout
- * is identical across reloads — the playtest warps to fixed coordinates.
+ * Water plane sizing, corrected from the Phase 2 contract's 700/24 default. At
+ * 700 units across 24 segments the vertex spacing is 29 units, so the swell can
+ * only resolve a ~175-unit wavelength and reads as a flat sheet. 320/48 gives
+ * 6.67-unit spacing, and `setCenter` keeps the plane under the player so the
+ * smaller sheet is never noticed.
  */
-function buildObstacles(terrain: TerrainGen, props: SpatialHash): THREE.InstancedMesh {
-  const geometry = new THREE.BoxGeometry(1, 1, 1);
-  const material = new THREE.MeshLambertMaterial({ color: 0x6b7a52, flatShading: true });
-  const mesh = new THREE.InstancedMesh(geometry, material, OBSTACLE_COUNT);
-  mesh.name = 'obstacles';
-  mesh.frustumCulled = true;
-
-  let seed = 0x9e3779b9;
-  const rand = (): number => {
-    // LCG — deterministic, no allocation, good enough for scattering.
-    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-    return seed / 0x100000000;
-  };
-
-  const span = terrain.size * 0.42;
-  for (let i = 0; i < OBSTACLE_COUNT; i++) {
-    // Keep a clear ring around spawn so the player never wakes up inside a rock.
-    let x = 0;
-    let z = 0;
-    for (let attempt = 0; attempt < 8; attempt++) {
-      x = (rand() * 2 - 1) * span;
-      z = (rand() * 2 - 1) * span;
-      if (x * x + z * z > 25) break;
-    }
-
-    const width = 0.9 + rand() * 1.8;
-    const depth = 0.9 + rand() * 1.8;
-    const height = 0.7 + rand() * 2.4;
-    const groundY = terrain.heightAt(x, z);
-
-    obstaclePos.set(x, groundY + height * 0.5, z);
-    obstacleScale.set(width, height, depth);
-    obstacleQuat.identity();
-    obstacleMatrix.compose(obstaclePos, obstacleQuat, obstacleScale);
-    mesh.setMatrixAt(i, obstacleMatrix);
-
-    // Axis-aligned only — §7's collision is capsule-vs-AABB, so unrotated boxes
-    // keep the test content honest about what the collision code actually handles.
-    obstacleBox.minX = x - width * 0.5;
-    obstacleBox.maxX = x + width * 0.5;
-    obstacleBox.minY = groundY;
-    obstacleBox.maxY = groundY + height;
-    obstacleBox.minZ = z - depth * 0.5;
-    obstacleBox.maxZ = z + depth * 0.5;
-    props.insert(obstacleBox);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
-  return mesh;
-}
+const WATER_SIZE = 320;
+const WATER_SEGMENTS = 48;
 
 // ---------------------------------------------------------------------------
 // Systems owned by the bootstrap
@@ -109,8 +55,8 @@ function buildObstacles(terrain: TerrainGen, props: SpatialHash): THREE.Instance
 /**
  * Feeds the camera's yaw to the player, because movement is camera-relative (§6)
  * while the camera follows the player. Running this first means the player uses
- * last tick's yaw — one 16.7 ms tick of lag, which is imperceptible, and it
- * avoids a circular dependency between the two systems.
+ * last tick's yaw — one 16.7 ms tick of lag, imperceptible, and it avoids a
+ * circular dependency between the two systems.
  */
 class CameraLinkSystem implements System {
   readonly name = 'cameraLink';
@@ -132,10 +78,10 @@ class CameraLinkSystem implements System {
 }
 
 /**
- * Scripted input override for automated tests. It runs AFTER the device input
- * producers and re-applies only the fields a test explicitly set, so keyboard
- * and touch cannot fight the script — and so a test that overrides nothing
- * still sees real pointer input (which is how the multi-touch check works).
+ * Scripted input override for automated tests. Runs AFTER the device input
+ * producers and re-applies only the fields a test explicitly set, so keyboard and
+ * touch cannot fight the script — and so a test that overrides nothing still sees
+ * real pointer input, which is how the touch checks work.
  *
  * NaN means "not overridden"; the boolean tri-state uses -1 for unset.
  */
@@ -174,19 +120,11 @@ class AvatarSystem implements System {
   constructor(avatar: BlockyAvatar, player: PlayerController) {
     this.avatar = avatar;
     this.player = player;
-    this.state = {
-      x: 0,
-      y: 0,
-      z: 0,
-      yaw: 0,
-      speed: 0,
-      grounded: true,
-      state: player.state,
-    };
+    this.state = { x: 0, y: 0, z: 0, yaw: 0, speed: 0, grounded: true, state: player.state };
   }
 
   update(): void {
-    /* nothing to simulate — the avatar is presentation only */
+    /* presentation only */
   }
 
   render(alpha: number): void {
@@ -213,8 +151,38 @@ class AvatarSystem implements System {
   }
 }
 
+/**
+ * Keeps the water plane under the player and hands the terrain's blended biome
+ * fog tint to the sky, so Whisperwood's blue mist (§5) shows up in the fog
+ * without the sky and the fog disagreeing at the horizon.
+ */
+class WorldLinkSystem implements System {
+  readonly name = 'worldLink';
+  private readonly player: PlayerController;
+  private readonly water: Water;
+  private readonly chunks: ChunkManager;
+  private readonly sky: SkyDayNight;
+
+  constructor(player: PlayerController, water: Water, chunks: ChunkManager, sky: SkyDayNight) {
+    this.player = player;
+    this.water = water;
+    this.chunks = chunks;
+    this.sky = sky;
+  }
+
+  update(): void {
+    const position = this.player.position;
+    this.water.setCenter(position.x, position.z);
+    this.sky.setBiomeFogTint(this.chunks.fogTint, this.chunks.fogTintWeight);
+  }
+
+  reset(): void {
+    /* nothing of its own */
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Debug hook (consumed by tools/smoke.mjs and tools/playtest.mjs)
+// Debug hook (consumed by tools/smoke.mjs, playtest.mjs, worldtest.mjs)
 // ---------------------------------------------------------------------------
 
 interface DebugPlayer {
@@ -238,6 +206,17 @@ interface DebugCamera {
   pitch: number;
 }
 
+interface DebugWorld {
+  activeChunks: number;
+  visibleChunks: number;
+  queuedChunks: number;
+  pooledGeometries: number;
+  propInstances: number;
+  colliders: number;
+  seaLevel: number;
+  worldSize: number;
+}
+
 interface ArcanumDebug {
   metrics(): ProfilerMetrics;
   frameCount(): number;
@@ -252,6 +231,10 @@ interface ArcanumDebug {
   camera(): DebugCamera;
   terrainHeightAt(x: number, z: number): number;
   warp(x: number, z: number): void;
+  biomeAt(x: number, z: number): { weights: number[]; dominant: number };
+  setDayPhase(phase: number): void;
+  dayPhase(): number;
+  world(): DebugWorld;
   version: string;
 }
 
@@ -300,26 +283,48 @@ function main(): void {
   }
 
   // --- world ---------------------------------------------------------------
-  const terrain = new TerrainGen({ seed: TERRAIN_SEED });
+  const biomes = new BiomeTable(WORLD_SEED);
+  const field = new HeightField({ seed: WORLD_SEED }, biomes);
   const props = new SpatialHash(5);
-  const obstacles = buildObstacles(terrain, props);
 
-  engine.scene.add(terrain.mesh, obstacles);
+  // SkyDayNight mutates this instance in place rather than replacing it, so the
+  // sky dome and the fog can never disagree at the horizon.
+  const fog = new THREE.FogExp2(0x9fc4d8, 0.016);
+  engine.scene.fog = fog;
 
-  // Dense exponential fog is what lets the far plane sit at 180 units (§3).
-  // SkyDayNight replaces these constants in Phase 2.
-  engine.scene.fog = new THREE.FogExp2(0x9fc4d8, 0.012);
-  engine.scene.background = new THREE.Color(0x9fc4d8);
-
+  // §3: exactly one directional light plus a hemisphere fill. No point lights.
   const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x4a5340, 1.0);
   const sun = new THREE.DirectionalLight(0xfff3d8, 1.45);
   sun.position.set(14, 22, 9);
   engine.scene.add(hemi, sun);
 
+  const sky = new SkyDayNight({ scene: engine.scene, sun, hemi, fog });
+  engine.scene.add(sky.dome);
+
+  const scatter = new PropScatter({ scene: engine.scene, field, biomes, props });
+  for (let i = 0; i < scatter.meshes.length; i++) {
+    const mesh = scatter.meshes[i];
+    if (mesh !== undefined) engine.scene.add(mesh);
+  }
+
+  const water = new Water({ level: SEA_LEVEL, size: WATER_SIZE, segments: WATER_SEGMENTS });
+  engine.scene.add(water.mesh);
+
   // --- player --------------------------------------------------------------
+  // Built before the streamer, so ChunkManager can hold the player itself as its
+  // target and read the live position every tick without a copy.
   const input = createInputState();
   const stats = new PlayerStats();
-  const player = new PlayerController({ terrain, props, input, stats, spawnX: 0, spawnZ: 0 });
+  const player = new PlayerController({ terrain: field, props, input, stats, spawnX: 0, spawnZ: 0 });
+
+  const chunks = new ChunkManager({
+    scene: engine.scene,
+    field,
+    biomes,
+    camera: engine.camera,
+    target: player,
+    props: scatter,
+  });
 
   const avatar = new BlockyAvatar();
   engine.scene.add(avatar.root);
@@ -327,10 +332,15 @@ function main(): void {
   const cameraRig = new CameraRig({
     camera: engine.camera,
     target: player,
-    terrain,
+    terrain: field,
     props,
     input,
   });
+
+  // Build the spawn neighbourhood before the first frame, behind the loading
+  // screen — this is the one place a build burst is allowed (§12: no stutter).
+  chunks.primeAround(player.position.x, player.position.z);
+  player.reset();
 
   // --- input + UI ----------------------------------------------------------
   const keyboard = new KeyboardInput(input);
@@ -342,16 +352,22 @@ function main(): void {
   cameraRig.setSensitivity(touch.sensitivity);
   cameraRig.setInvertY(touch.invertY);
 
-  // Order matters: link (camera yaw -> player) → device input → scripted
-  // override → stats → player → camera → avatar → HUD.
+  // Order: link → device input → scripted override → stats → player → streaming
+  // → camera → avatar → world links → HUD. Streaming runs after the player moves
+  // so it always windows on this tick's position.
   engine.addSystem(new CameraLinkSystem(player, cameraRig));
   engine.addSystem(keyboard);
   engine.addSystem(touch);
   engine.addSystem(override);
   engine.addSystem(stats);
   engine.addSystem(player);
+  engine.addSystem(chunks);
+  engine.addSystem(scatterSystemFor(scatter));
   engine.addSystem(cameraRig);
   engine.addSystem(new AvatarSystem(avatar, player));
+  engine.addSystem(water);
+  engine.addSystem(sky);
+  engine.addSystem(new WorldLinkSystem(player, water, chunks, sky));
   engine.addSystem(hud);
 
   // --- debug overlay toggle ------------------------------------------------
@@ -388,6 +404,8 @@ function main(): void {
   engine.start();
 
   // --- debug hook ---------------------------------------------------------
+  const biomeScratch = createBiomeSample();
+
   const debug: ArcanumDebug = {
     metrics: () => {
       const m = engine.profiler.metrics;
@@ -468,12 +486,35 @@ function main(): void {
       yaw: cameraRig.yaw,
       pitch: cameraRig.pitch,
     }),
-    terrainHeightAt: (x: number, z: number) => terrain.heightAt(x, z),
+    terrainHeightAt: (x: number, z: number) => field.heightAt(x, z),
     warp: (x: number, z: number) => {
-      player.position.set(x, terrain.heightAt(x, z), z);
+      player.position.set(x, field.heightAt(x, z), z);
       player.prevPosition.copy(player.position);
       player.velocity.set(0, 0, 0);
+      // Streaming is incremental by design, so a teleport needs an explicit prime
+      // or the player would stand over unbuilt chunks for several frames.
+      chunks.primeAround(x, z);
     },
+
+    biomeAt: (x: number, z: number) => {
+      biomes.sample(x, z, biomeScratch);
+      // A fresh array: this crosses the CDP boundary and must be serialisable.
+      return { weights: biomeScratch.weights.slice(), dominant: biomeScratch.dominant };
+    },
+    setDayPhase: (phase: number) => {
+      sky.setPhase(phase);
+    },
+    dayPhase: () => sky.phase,
+    world: () => ({
+      activeChunks: chunks.activeCount,
+      visibleChunks: chunks.visibleCount,
+      queuedChunks: chunks.queuedCount,
+      pooledGeometries: chunks.pooledCount,
+      propInstances: scatter.instanceCount,
+      colliders: scatter.collidersRegistered,
+      seaLevel: SEA_LEVEL,
+      worldSize: field.worldSize,
+    }),
 
     version: VERSION,
   };
@@ -489,8 +530,28 @@ function main(): void {
   window.requestAnimationFrame(waitForFirstFrames);
 
   if (import.meta.env.DEV) {
-    console.info('[arcanum] phase 1 online —', VERSION);
+    console.info('[arcanum] phase 2 online —', VERSION);
   }
+}
+
+/**
+ * PropScatter is driven by ChunkManager's enter/leave callbacks rather than by a
+ * per-frame update, so it is not a System. This adapter exists only so its
+ * `reset()` participates in `engine.reset()`.
+ */
+function scatterSystemFor(scatter: PropScatter): System {
+  return {
+    name: 'props',
+    update: () => {
+      /* driven by ChunkManager */
+    },
+    reset: () => {
+      scatter.clear();
+    },
+    dispose: () => {
+      scatter.dispose();
+    },
+  };
 }
 
 // Block the browser gestures that survive CSS alone.

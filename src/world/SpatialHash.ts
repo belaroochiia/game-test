@@ -30,6 +30,13 @@ export class SpatialHash {
   /** Last query that visited each box, so a multi-cell box reports once. */
   private readonly stamp: number[] = [];
   private currentStamp = 0;
+  /**
+   * Ids returned by `remove`, reused by the next `insert`. Without this the store
+   * grows monotonically: Phase 2 streams props in and out of the active set
+   * continuously, so ~8 AABBs per chunk entry would accumulate forever, inflating
+   * both the heap and every query bucket they still sat in.
+   */
+  private readonly freeIds: number[] = [];
 
   /** cellKey -> ids. Arrays are reused; ids are appended, never spliced on clear. */
   private readonly cells = new Map<number, number[]>();
@@ -42,17 +49,34 @@ export class SpatialHash {
 
   /** The AABB is copied, so callers may reuse a scratch object. */
   insert(box: AABB): number {
-    const id = this.boxes.length;
-    this.boxes.push({
-      minX: box.minX,
-      minY: box.minY,
-      minZ: box.minZ,
-      maxX: box.maxX,
-      maxY: box.maxY,
-      maxZ: box.maxZ,
-    });
-    this.alive.push(true);
-    this.stamp.push(-1);
+    // Reuse a freed slot when one exists; its cell entries were removed by
+    // `remove`, so the id cannot resurface in a stale bucket.
+    let id = this.freeIds.pop() ?? -1;
+    if (id >= 0) {
+      const existing = this.boxes[id];
+      if (existing !== undefined) {
+        existing.minX = box.minX;
+        existing.minY = box.minY;
+        existing.minZ = box.minZ;
+        existing.maxX = box.maxX;
+        existing.maxY = box.maxY;
+        existing.maxZ = box.maxZ;
+      }
+      this.alive[id] = true;
+      this.stamp[id] = -1;
+    } else {
+      id = this.boxes.length;
+      this.boxes.push({
+        minX: box.minX,
+        minY: box.minY,
+        minZ: box.minZ,
+        maxX: box.maxX,
+        maxY: box.maxY,
+        maxZ: box.maxZ,
+      });
+      this.alive.push(true);
+      this.stamp.push(-1);
+    }
     this.liveCount++;
 
     const x0 = Math.floor(box.minX * this.invCellSize);
@@ -74,14 +98,45 @@ export class SpatialHash {
   }
 
   /**
-   * Tombstones the box. The cell buckets keep the id — a dead id costs one
-   * boolean check per visit, which is cheaper than rewriting every bucket, and
-   * Phase 2's streaming removes props by the chunkful via `clear()` anyway.
+   * Frees the box: its id is pulled out of every cell bucket it occupies and
+   * returned to the free list.
+   *
+   * An earlier version only tombstoned, on the theory that a dead id costs one
+   * boolean check per visit. That is true per visit but wrong in aggregate —
+   * streaming props in and out of the active set left every removed AABB in its
+   * buckets forever, so both the heap and the query cost grew for the whole
+   * session. A box spans 1–4 cells, so pulling it out now is cheap and bounded.
    */
   remove(id: number): void {
     if (id < 0 || id >= this.alive.length) return;
     if (this.alive[id] !== true) return;
+    const box = this.boxes[id];
+    if (box !== undefined) {
+      const x0 = Math.floor(box.minX * this.invCellSize);
+      const x1 = Math.floor(box.maxX * this.invCellSize);
+      const z0 = Math.floor(box.minZ * this.invCellSize);
+      const z1 = Math.floor(box.maxZ * this.invCellSize);
+      for (let cz = z0; cz <= z1; cz++) {
+        for (let cx = x0; cx <= x1; cx++) {
+          const key = SpatialHash.key(cx, cz);
+          const bucket = this.cells.get(key);
+          if (bucket === undefined) continue;
+          // Swap-with-last: bucket order carries no meaning.
+          for (let i = 0; i < bucket.length; i++) {
+            if (bucket[i] !== id) continue;
+            const last = bucket.length - 1;
+            const tail = bucket[last];
+            if (tail !== undefined) bucket[i] = tail;
+            bucket.length = last;
+            break;
+          }
+          if (bucket.length === 0) this.cells.delete(key);
+        }
+      }
+    }
     this.alive[id] = false;
+    this.stamp[id] = -1;
+    this.freeIds.push(id);
     this.liveCount--;
   }
 
@@ -89,6 +144,7 @@ export class SpatialHash {
     this.boxes.length = 0;
     this.alive.length = 0;
     this.stamp.length = 0;
+    this.freeIds.length = 0;
     this.cells.clear();
     this.liveCount = 0;
     this.currentStamp = 0;

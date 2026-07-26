@@ -145,7 +145,14 @@ const WHISPERWOOD: BiomeDef = {
   colorHigh: 0x46836b, // §5's teal
   colorRock: 0x55636e,
   fogColor: 0x3f6f7d, // §5's blue mist
-  propDensity: [10, 2, 3, 6], // dense trees, glowing mushrooms
+  /*
+   * 15 trees, not 10: a third of Whisperwood's tree candidates are rejected for
+   * exceeding PropScatter's 30 deg slope limit on this biome's ridged relief, so
+   * asking for 10 yielded 6.7 per chunk — a wood, not §5's "hutan padat". At 15 the
+   * yield lands near 10 and the worst-case triangle total is still ~45 000 of the
+   * ~95 000 the §3 budget leaves for props.
+   */
+  propDensity: [15, 2, 3, 6], // dense trees, glowing mushrooms
 };
 
 /** sRGB -> linear happens once, here, not per sample. */
