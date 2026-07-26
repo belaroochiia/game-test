@@ -96,14 +96,17 @@ let previewChild = null;
 let browser = null;
 /** @type {NodeJS.Timeout | null} */
 let hardTimer = null;
+let hardTimedOut = false;
 let cleanedUp = false;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function killPreview(signal) {
   const child = previewChild;
-  if (child === null || child.exitCode !== null || child.signalCode !== null) return;
+  if (child === null) return;
   // Spawned detached, so the whole group dies with it (npx adds a shell layer).
+  // Signal unconditionally: a stale exitCode guard is how servers get orphaned,
+  // and signalling a dead group only throws ESRCH, which we swallow.
   try {
     process.kill(-child.pid, signal);
   } catch {
@@ -113,6 +116,23 @@ function killPreview(signal) {
       /* already gone */
     }
   }
+}
+
+/**
+ * A leaked preview server makes the *next* run refuse to start, so verify.
+ *
+ * The test is "does anything still answer HTTP", not "can we bind": a socket the
+ * kernel still holds while nothing serves on it is a teardown artefact that
+ * resolves itself, and warning about it would cry wolf on every clean run.
+ */
+async function waitForPortRelease(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await probe(PAGE_URL, 500)) === 0) return true;
+    killPreview('SIGKILL');
+    await sleep(250);
+  }
+  return (await probe(PAGE_URL, 500)) === 0;
 }
 
 async function cleanup() {
@@ -131,9 +151,16 @@ async function cleanup() {
       /* ignore */
     }
   }
+  if (previewChild === null) return;
   killPreview('SIGTERM');
   await sleep(250);
   killPreview('SIGKILL');
+  if (!(await waitForPortRelease(5_000))) {
+    console.error(
+      `[smoke] WARNING: port ${PORT} is still held after teardown. Kill the leftover\n` +
+        `[smoke] preview server before the next run:  fuser -k ${PORT}/tcp`
+    );
+  }
 }
 
 // Last-resort synchronous reap, covers any exit path we did not anticipate.
@@ -330,7 +357,8 @@ async function startPreviewServer() {
     throw new Fatal(
       `Port ${PORT} is already in use on ${HOST}.\n` +
         '  Refusing to continue: the harness would test whatever is already listening\n' +
-        '  there instead of this build. Stop that process and re-run.'
+        '  there instead of this build (a passing run would be a lie).\n' +
+        `  Free it and re-run:  fuser -k ${PORT}/tcp   (or: lsof -ti:${PORT} | xargs kill)`
     );
   }
 
@@ -868,12 +896,17 @@ async function main() {
   const started = Date.now();
 
   hardTimer = setTimeout(() => {
+    hardTimedOut = true;
     console.error('');
     console.error(`[smoke] HARD TIMEOUT after ${OVERALL_TIMEOUT_MS} ms — killing browser and preview server.`);
     console.error('[smoke] Something hung: the app never booted, or the loop never advanced.');
     killPreview('SIGKILL');
     if (browser !== null) void browser.close().catch(() => {});
-    setTimeout(() => process.exit(1), 1_500);
+    // Backstop only: the normal path below still writes artifacts and the summary.
+    setTimeout(() => {
+      console.error('[smoke] teardown did not finish — exiting hard.');
+      process.exit(1);
+    }, 5_000);
   }, OVERALL_TIMEOUT_MS);
 
   try {
@@ -883,8 +916,21 @@ async function main() {
     assertSamples();
     assertNoErrors();
   } catch (err) {
-    if (err instanceof Fatal) fail('harness precondition', err.message);
-    else fail('harness error', err?.stack ?? String(err));
+    // After a hard timeout everything downstream throws "target closed" style
+    // noise; report the real cause instead of the cascade.
+    if (!hardTimedOut) {
+      if (err instanceof Fatal) fail('harness precondition', err.message);
+      else fail('harness error', err?.stack ?? String(err));
+    }
+  }
+
+  if (hardTimedOut) {
+    fail(
+      'overall timeout',
+      `the run exceeded the ${OVERALL_TIMEOUT_MS} ms hard wall and was killed.\n` +
+        '      The app hung: it never booted, the render loop never advanced, or the\n' +
+        `      preview server never became reachable on ${PAGE_URL}.`
+    );
   }
 
   report.durationMs = Date.now() - started;
