@@ -20,6 +20,20 @@ import { CameraRig } from './player/CameraRig';
 import { BlockyAvatar } from './player/PlayerAvatar';
 import type { AvatarState } from './player/PlayerAvatar';
 
+import skillsJson from './data/skills.json';
+import fusionsJson from './data/fusions.json';
+import loadoutJson from './data/loadout.json';
+import { SkillRegistry, validateFusions } from './skills/SkillRegistry';
+import { Grimoire } from './skills/Grimoire';
+import { SkillRuntime } from './skills/SkillRuntime';
+import { SkillVfx } from './skills/vfx/SkillVfx';
+import { SoulOrbs, setOrbSeed } from './skills/SoulOrbs';
+import { StatusEffects, setStatusSeed } from './combat/StatusEffects';
+import type { StatusId } from './combat/StatusEffects';
+import { GrimoireScreen } from './ui/GrimoireScreen';
+import { Notifications } from './ui/Notifications';
+import { consumeBufferedSkill } from './player/InputState';
+
 import { TEAM } from './combat/CombatTypes';
 import type { Combatant, DamagePacket } from './combat/CombatTypes';
 import { Hitstop } from './combat/Hitstop';
@@ -46,7 +60,7 @@ import './styles/game-ui.css';
  * budgets (Phase 5), progression and save (Phase 6).
  */
 
-const VERSION = '0.4.0-phase3';
+const VERSION = '0.5.0-phase4';
 
 const WORLD_SEED = 1337;
 
@@ -193,6 +207,35 @@ class WorldLinkSystem implements System {
   }
 }
 
+/**
+ * Consumes buffered skill presses (touch and keyboard both queue into
+ * InputState) and hands them to the runtime — one consumer, so a press can
+ * never double-cast.
+ */
+class SkillCastSystem implements System {
+  readonly name = 'skillCast';
+  private readonly input: ReturnType<typeof createInputState>;
+  private readonly runtime: SkillRuntime;
+
+  constructor(input: ReturnType<typeof createInputState>, runtime: SkillRuntime) {
+    this.input = input;
+    this.runtime = runtime;
+  }
+
+  update(): void {
+    const now = performance.now();
+    for (let slot = 0; slot < 4; slot++) {
+      if (consumeBufferedSkill(this.input, slot, now)) {
+        this.runtime.castSlot(slot);
+      }
+    }
+  }
+
+  reset(): void {
+    /* stateless */
+  }
+}
+
 /** Feeds §6.6's lock into the player's auto-aim each tick. */
 class AimLinkSystem implements System {
   readonly name = 'aimLink';
@@ -272,7 +315,42 @@ interface ArcanumDebug {
   setDamageSeed(n: number): void;
   spawnSlimes(x: number, z: number, count: number, radius: number): void;
   killAllEnemies(): void;
+  skills(): DebugSkillSlot[];
+  grimoire(): DebugGrimoire;
+  castSlot(slot: number): boolean;
+  lastRefusal(): string;
+  statusOf(enemyId: number): DebugStatus[];
+  learnSkill(id: string): void;
+  equipSkill(slot: number, id: string): void;
+  setStatusSeed(n: number): void;
+  setOrbSeed(n: number): void;
+  fuse(a: string, b: string): string | null;
+  orbs(): { count: number; nearby: boolean; absorbProgress: number };
+  forceAbsorb(active: boolean): void;
+  grimoireScreen(): { open: boolean };
+  openGrimoire(): void;
+  closeGrimoire(): void;
   version: string;
+}
+
+interface DebugSkillSlot {
+  slot: number;
+  id: string | null;
+  cooldownLeft: number;
+  cooldownFraction: number;
+  manaCost: number;
+}
+
+interface DebugGrimoire {
+  known: string[];
+  equipped: (string | null)[];
+  mastery: Record<string, { level: number; uses: number }>;
+}
+
+interface DebugStatus {
+  id: number;
+  remaining: number;
+  stacks: number;
 }
 
 interface DebugEnemy {
@@ -421,6 +499,13 @@ function main(): void {
   // 11), close enough that the first fight is under twenty seconds away.
   enemies.spawnSlimes(14, -6, 3, 3.5);
 
+  enemies.freezeRef = {
+    isFrozen: (c) => {
+      const enemy = findEnemyById(c.id);
+      return enemy !== undefined && status.has(enemy, 1 as StatusId);
+    },
+  };
+
   const targetLock = new TargetLock({
     scene: engine.scene,
     camera: engine.camera,
@@ -429,6 +514,35 @@ function main(): void {
   });
 
   const damageNumbers = new DamageNumbers({ mount: uiRoot, camera: engine.camera });
+
+  // --- the Grimoire stack (Phase 4) ---------------------------------------
+  // Everything below is driven by skills.json; ids live ONLY in JSON (§4.1).
+  const registry = new SkillRegistry(skillsJson);
+  validateFusions(registry, fusionsJson);
+  const grimoire = new Grimoire({
+    registry,
+    bus: engine.bus,
+    startingLoadout: loadoutJson.startingLoadout,
+  });
+  const status = new StatusEffects({ damage, hitbox, bus: engine.bus });
+  status.register(playerCombatant);
+  const vfx = new SkillVfx({ scene: engine.scene });
+  const runtime = new SkillRuntime({
+    registry,
+    grimoire,
+    stats,
+    player,
+    playerCombatant,
+    hitbox,
+    damage,
+    status,
+    lock: targetLock,
+    vfx,
+    bus: engine.bus,
+  });
+  const orbs = new SoulOrbs({ scene: engine.scene, player, grimoire, registry, bus: engine.bus });
+  const grimoireScreen = new GrimoireScreen({ mount: uiRoot, registry, grimoire, bus: engine.bus });
+  const notifications = new Notifications({ mount: uiRoot, bus: engine.bus, registry, hitstop });
 
   /** Melee scaling (§9's statScaling term): agility carries the sword. */
   const meleeScaling = (): number => stats.agility * 0.35;
@@ -477,8 +591,18 @@ function main(): void {
     input,
   });
 
+  const findEnemyById = (id: number): EnemyBase | undefined => {
+    const all = enemies.enemies;
+    for (let i = 0; i < all.length; i++) {
+      const enemy = all[i];
+      if (enemy !== undefined && enemy.id === id) return enemy;
+    }
+    return undefined;
+  };
+
   // Damage fan-out: numbers always; trauma and haptics scale with weight, and
-  // getting hit shakes harder than dealing (§7's trauma-based shake).
+  // getting hit shakes harder than dealing (§7's trauma-based shake). DoT ticks
+  // are silent: numbers show, but no trauma, no haptics (§8.5).
   const canBuzz = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
   damage.onDamage((event) => {
     damageNumbers.spawn(
@@ -489,13 +613,35 @@ function main(): void {
       event.packet.crit,
       event.packet.heavy,
     );
+    if (event.silent) return;
     if (event.target === playerCombatant) {
       cameraRig.addTrauma(0.4);
     } else {
       cameraRig.addTrauma(event.packet.heavy ? 0.28 : 0.1);
       if (canBuzz) navigator.vibrate(10); // §6.7
     }
+    // §8.2.1: a kill may leave a soul orb. Status boards follow the corpse.
+    if (event.killed && event.target !== playerCombatant) {
+      orbs.maybeDrop(
+        event.target.position.x,
+        event.target.position.y + 0.6,
+        event.target.position.z,
+        0.5,
+        event.target.id,
+      );
+    }
   });
+
+  // Status boards for everything that fights. Enemies register as they spawn;
+  // Phase 4's fixed camp registers here, and spawnSlimes via debug re-registers.
+  const registerEnemyBoards = (): void => {
+    const all = enemies.enemies;
+    for (let i = 0; i < all.length; i++) {
+      const enemy = all[i];
+      if (enemy !== undefined) status.register(enemy);
+    }
+  };
+  registerEnemyBoards();
 
   // Build the spawn neighbourhood before the first frame, behind the loading
   // screen — this is the one place a build burst is allowed (§12: no stutter).
@@ -507,6 +653,9 @@ function main(): void {
   const override = new InputOverrideSystem(input);
   const touch = new TouchControls({ mount: uiRoot, input, stats, player });
   const hud = new HUD({ mount: uiRoot, stats });
+
+  touch.skillsRef = runtime;
+  touch.orbsRef = orbs;
 
   touch.setSensitivity(0.005);
   cameraRig.setSensitivity(touch.sensitivity);
@@ -526,6 +675,10 @@ function main(): void {
   engine.addSystem(enemies);
   engine.addSystem(hitbox);
   engine.addSystem(damage);
+  engine.addSystem(status);
+  engine.addSystem(new SkillCastSystem(input, runtime));
+  engine.addSystem(runtime);
+  engine.addSystem(orbs);
   engine.addSystem(targetLock);
   engine.addSystem(new AimLinkSystem(player, targetLock));
   engine.addSystem(chunks);
@@ -536,6 +689,7 @@ function main(): void {
   engine.addSystem(sky);
   engine.addSystem(new WorldLinkSystem(player, water, chunks, sky));
   engine.addSystem(damageNumbers);
+  engine.addSystem(notifications);
   engine.addSystem(hud);
 
   // --- debug overlay toggle ------------------------------------------------
@@ -568,6 +722,17 @@ function main(): void {
     if (boot !== null) boot.classList.remove('is-gone');
     fail('Graphics context was lost. Reload the page to continue.');
   });
+
+  // The HUD's book icon opens the Grimoire (Phase 4). It was aria-disabled
+  // chrome until now; the screen exists, so it becomes live.
+  const grimoireButton = uiRoot.querySelector('[data-action="grimoire"]');
+  if (grimoireButton instanceof HTMLButtonElement) {
+    grimoireButton.removeAttribute('aria-disabled');
+    grimoireButton.addEventListener('click', () => {
+      if (grimoireScreen.isOpen) grimoireScreen.close();
+      else grimoireScreen.open();
+    });
+  }
 
   engine.start();
 
@@ -721,6 +886,78 @@ function main(): void {
     },
     killAllEnemies: () => {
       enemies.killAll();
+    },
+
+    skills: () => {
+      const list: DebugSkillSlot[] = [];
+      for (let slot = 0; slot < 4; slot++) {
+        const def = runtime.skillAt(slot);
+        list.push({
+          slot,
+          id: def !== null ? def.id : null,
+          cooldownLeft: runtime.cooldownSeconds(slot),
+          cooldownFraction: runtime.cooldownFraction(slot),
+          manaCost: runtime.manaCost(slot),
+        });
+      }
+      return list;
+    },
+    grimoire: () => {
+      const known: string[] = [];
+      const mastery: Record<string, { level: number; uses: number }> = {};
+      const all = registry.all;
+      for (let i = 0; i < all.length; i++) {
+        const def = all[i];
+        if (def === undefined || !grimoire.isKnown(def.id)) continue;
+        known.push(def.id);
+        const info = grimoire.mastery(def.id);
+        mastery[def.id] = { level: info.level, uses: info.uses };
+      }
+      const equipped: (string | null)[] = [];
+      for (let slot = 0; slot < 4; slot++) equipped.push(grimoire.equipped(slot));
+      return { known, equipped, mastery };
+    },
+    castSlot: (slot: number) => runtime.castSlot(slot),
+    lastRefusal: () => runtime.lastRefusal,
+    statusOf: (enemyId: number) => {
+      const enemy = findEnemyById(enemyId);
+      const list: DebugStatus[] = [];
+      if (enemy === undefined) return list;
+      for (let id = 0; id < 6; id++) {
+        const state = status.get(enemy, id as StatusId);
+        if (state !== null && state.remaining > 0) {
+          list.push({ id, remaining: state.remaining, stacks: state.stacks });
+        }
+      }
+      return list;
+    },
+    learnSkill: (id: string) => {
+      grimoire.learn(id, 'debug');
+    },
+    equipSkill: (slot: number, id: string) => {
+      grimoire.equip(slot, id);
+    },
+    setStatusSeed: (n: number) => {
+      setStatusSeed(n);
+    },
+    setOrbSeed: (n: number) => {
+      setOrbSeed(n);
+    },
+    fuse: (a: string, b: string) => grimoire.fuse(a, b),
+    orbs: () => ({
+      count: orbs.liveOrbCount,
+      nearby: orbs.nearbyOrb,
+      absorbProgress: orbs.absorbProgress,
+    }),
+    forceAbsorb: (active: boolean) => {
+      orbs.setAbsorbing(active);
+    },
+    grimoireScreen: () => ({ open: grimoireScreen.isOpen }),
+    openGrimoire: () => {
+      grimoireScreen.open();
+    },
+    closeGrimoire: () => {
+      grimoireScreen.close();
     },
 
     version: VERSION,

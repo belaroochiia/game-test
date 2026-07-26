@@ -1,5 +1,6 @@
 import type { System } from '../core/Engine';
 import type { EventBus } from '../core/EventBus';
+import { ACTIVE_SLOTS } from '../skills/Grimoire';
 import type { Grimoire } from '../skills/Grimoire';
 import type { SkillRegistry } from '../skills/SkillRegistry';
 import { ELEMENTS, RARITIES } from '../skills/SkillTypes';
@@ -34,9 +35,9 @@ export interface GrimoireScreenOptions {
 }
 
 const STYLE_ID = 'gs-style';
-const ACTIVE_SLOTS = 4; // §8.4
 const MASTERY_LEVELS = 5;
-const FUSION_MASTERY = 3; // §8.2.5: both ingredients at mastery >= 3
+/** Mirrors Grimoire's (unexported) FUSE_MASTERY — §8.2.5's "mastery >= 3". */
+const FUSION_MASTERY = 3;
 
 /** One palette for chips/dots everywhere; derived from the skills' vfxColors. */
 const ELEMENT_COLOR: Readonly<Record<ElementId, string>> = {
@@ -579,25 +580,43 @@ export class GrimoireScreen implements System {
     dom.fuseB.nodeValue = bName ?? 'PICK B';
 
     let resultText = '—';
+    let resultSet = false;
     let secret = false;
     let note: string;
     let canConfirm = false;
     if (this.fuseA !== null && this.fuseB !== null) {
+      // Grimoire refuses re-fusing a known result ('result-known'), so an ok
+      // verdict ALWAYS means an undiscovered skill: §8.3's blur is exactly the
+      // ok case, and the named preview is exactly the result-known refusal.
       const check = g.canFuse(this.fuseA, this.fuseB);
-      if (check.ok) {
-        canConfirm = true;
-        // §8.3's blur: the result's name only shows once the skill is known.
-        const known = check.result !== null && g.isKnown(check.result);
-        if (known && check.result !== null) {
-          resultText = this.registry.get(check.result)?.name ?? check.result;
-          note = 'Result already known. Fusing still consumes both skills.';
-        } else {
-          resultText = '???';
+      switch (check.reason) {
+        case 'ok':
+          canConfirm = true;
+          resultSet = true;
           secret = true;
+          resultText = '???';
           note = 'Something new stirs... Both skills are consumed by the fusion.';
-        }
-      } else {
-        note = check.reason;
+          break;
+        case 'result-known':
+          resultSet = true;
+          resultText =
+            check.result !== null
+              ? (this.registry.get(check.result)?.name ?? check.result)
+              : '—';
+          note = 'Already inscribed in your grimoire — nothing would be gained.';
+          break;
+        case 'no-recipe':
+          note = 'These two refuse to combine.';
+          break;
+        case 'mastery':
+          note = 'Both skills must be at mastery ' + FUSION_MASTERY + ' or higher.';
+          break;
+        case 'not-known':
+          note = 'Both skills must be in your grimoire.';
+          break;
+        case 'same-skill':
+          note = 'Pick two different skills.';
+          break;
       }
     } else {
       note =
@@ -605,7 +624,7 @@ export class GrimoireScreen implements System {
           ? 'Fusion needs two different skills, both at mastery ' + FUSION_MASTERY + ' or higher.'
           : 'Pick two skills to combine.';
     }
-    dom.fuseResultBox.classList.toggle('is-set', canConfirm);
+    dom.fuseResultBox.classList.toggle('is-set', resultSet);
     dom.fuseResultBox.classList.toggle('is-secret', secret);
     if (resultText !== dom.fuseResult.nodeValue) dom.fuseResult.nodeValue = resultText;
     if (note !== dom.fuseNote.nodeValue) dom.fuseNote.nodeValue = note;
