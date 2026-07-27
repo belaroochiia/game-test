@@ -566,6 +566,15 @@ export const ENEMY_PROJECTILE_MAX = 12;
 
 /** Hit sphere riding the tracer. */
 const PROJECTILE_RADIUS = 0.4;
+/**
+ * Ground kill uses its OWN clearance, not the hit radius: a small ranged kind
+ * (blob at scale 0.7) fires from a muzzle only ~0.41 u up, and killing the
+ * shot at `ground + 0.4` left it one centimetre of clearance on flat ground
+ * and none uphill — the smallest ranged kind's volleys all died at the muzzle
+ * (Phase 5 gate finding). 0.15 still reads right: the 0.16-size tracer
+ * visually skims, and a shot whose CENTRE enters the hillside still dies.
+ */
+const PROJECTILE_GROUND_CLEARANCE = 0.15;
 /** Hard expiry; the slowest def (10 u/s) still covers 40 u — beyond any aggro. */
 const PROJECTILE_LIFETIME = 4;
 const TRACER_SIZE = 0.16;
@@ -749,7 +758,7 @@ export class EnemyProjectiles {
       if (
         slot.life <= 0 ||
         !field.inBounds(slot.x, slot.z) ||
-        slot.y - PROJECTILE_RADIUS <= field.heightAt(slot.x, slot.z)
+        slot.y - PROJECTILE_GROUND_CLEARANCE <= field.heightAt(slot.x, slot.z)
       ) {
         this.deactivate(slot);
         continue;

@@ -13,7 +13,8 @@
     "playtest": "node tools/playtest.mjs",
     "worldtest": "node tools/worldtest.mjs",
     "combattest": "node tools/combattest.mjs",
-    "skilltest": "node tools/skilltest.mjs"
+    "skilltest": "node tools/skilltest.mjs",
+    "contenttest": "node tools/contenttest.mjs"
   },
   "dependencies": {
     "three": "^0.185.1"

@@ -7,8 +7,10 @@ scope, performance budgets and anti-patterns. Work proceeds **one phase per
 session** and a phase is not done until its acceptance criterion is met on a real
 phone.
 
-> **Status: Phase 4 — The Grimoire. Complete and device-verified.**
-> Phases 5–7 are not started. Do not add features from a later phase before the
+> **Status: Phase 5 — the filled world. Code-complete, all six headless gates
+> green. Awaiting device verification** (§12: 20 minutes of exploration without
+> emptiness or repetition — a feel judgement only a phone can make).
+> Phases 6–7 are not started. Do not add features from a later phase before the
 > current one's acceptance criterion is verified on hardware (§12, §13).
 
 ## Stack
@@ -40,6 +42,10 @@ npm run build      # typecheck + production bundle into dist/
 npm run preview    # serve dist/ over the LAN
 npm run smoke      # headless boot + budget check against dist/ (see caveat below)
 npm run playtest   # headless gameplay gate: drives the player, measures §7's numbers
+npm run worldtest  # streaming, LOD, biomes, day-night, water, budgets on a world walk
+npm run combattest # melee combo, telegraphs, i-frames, hitstop, death/respawn, seeds
+npm run skilltest  # the Grimoire: every skill from JSON, reactions, mastery, fusion
+npm run contenttest# Phase 5 content: regions, director, bestiary, shrines, boss Vael
 ```
 
 Desktop controls for development: **WASD** move, **Shift** sprint, **Space** dash,
@@ -58,25 +64,56 @@ src/
     Profiler.ts            FPS / frame / CPU / draws / tris / heap DOM overlay
     EventBus.ts            typed, allocation-free, re-entrancy safe pub-sub
     ObjectPool.ts          generic pool with hard cap and high-water tracking
-  world/                   [Phase 1]
-    TerrainGen.ts          seeded value-noise heightmap, vertex-coloured, analytic sampling
-    SpatialHash.ts         5x5 grid of AABBs for prop collision, allocation-free queries
+  world/
+    TerrainGen.ts          [P1] seeded value-noise heightmap, vertex-coloured, analytic
+    SpatialHash.ts         [P1] 5x5 grid of AABBs for prop collision, allocation-free
+    HeightField.ts         [P2] world-space height/tint sampling, region-aware
+    BiomeTable.ts          [P2→5] the five §5 regions as priority-chain masks
+    ChunkManager.ts        [P2] 5x5 streaming, LOD0/LOD1, pooled geometry, culling
+    PropScatter.ts         [P2→5] instanced props, deterministic per (seed, chunk)
+    SkyDayNight.ts         [P2] 12-minute cycle from 4 keyframes; fog, sun, ambient
+    Water.ts               [P2] one displaced plane, 2-colour gradient + fresnel
+    Shrines.ts             [P5] six elemental shrines: FSM, three challenge kinds
+    Fragments.ts           [P5] nine Grimoire Fragment sites, 3-of-a-kind assembly
   player/                  [Phase 1]
     PlayerController.ts    capsule movement, state machine, terrain + prop collision
     CameraRig.ts           third-person orbit, collision-aware, sprint FOV, screen shake
     PlayerAvatar.ts        blocky procedural character + the GLTF swap seam (§5)
     PlayerStats.ts         §10's five stats, HP/MP pools, mana regen
     InputState.ts          the one input struct, with §7's 0.12 s input buffer
-  input/KeyboardInput.ts   [Phase 1] desktop input; also what the playtest drives
-  ui/                      [Phase 1]
-    TouchControls.ts       dynamic joystick, camera zone, skill/attack/dash buttons
-    HUD.ts                 HP/MP bars, level chip, icon row
-  styles/
-    main.css               game-surface CSS: no scroll, no zoom, safe-area aware
-    game-ui.css            HUD + touch control layout
-tools/
-  smoke.mjs                headless boot and budget gate
-  playtest.mjs             headless gameplay gate: measures §7's movement numbers
+  input/KeyboardInput.ts   [Phase 1] desktop input; also what the gates drive
+  combat/                  [Phase 3–4]
+    HitboxSystem.ts        sphere/capsule overlap, fixed slots, team filters
+    DamageSystem.ts        §9's formula, seeded crits, hitstop hook, damage events
+    Hitstop.ts             tick-gated freeze: combat stops, the world breathes
+    StatusEffects.ts       burn/freeze/wet/shock/bleed/silence + §8.5 reactions
+    TargetLock.ts          §6.6 soft lock: nearest enemy in the 40° / 15 u cone
+  skills/                  [Phase 4]
+    SkillRegistry.ts       data-driven registry; §4.1: adding a skill = JSON only
+    SkillRuntime.ts        cast, cooldown, mana, delivery (projectile/nova/self)
+    Grimoire.ts            collection, equip slots, mastery, fragments, fusion
+    SoulOrbs.ts            §8.2 soul absorption: orb, hold, freeze-frame, card
+    vfx/SkillVfx.ts        pooled, data-keyed cast/projectile/nova/status visuals
+  enemy/
+    EnemyBase.ts           [P3] shared enemy lifecycle: hp, knockback, respawn seam
+    AIBrain.ts             [P3] §9 FSM: Idle→Patrol→Alert→Chase→Attack→Flee→Dead
+    EnemyDefs.ts           [P5] enemies.json → frozen archetype defs (§4.1 for enemies)
+    EnemyVisual.ts         [P5] five procedural body archetypes, per-kind tint/scale
+    ArchetypeEnemy.ts      [P5] one class, twelve kinds: stats, attacks, projectiles
+    EnemyManager.ts        [P3→5] registry, cap 18, purge/respawn, hitstop gating
+    SpawnDirector.ts       [P5] §9 budgets per region, cadence, despawn hysteresis
+    BossVael.ts            [P5] scripted 3-phase boss, reaction-stripped shield
+  ui/
+    TouchControls.ts       [P1→5] joystick, camera, skills, contextual ⚔/✋/⚑ button
+    HUD.ts                 [P1] HP/MP bars, level chip, icon row
+    DamageNumbers.ts       [P3] pooled DOM damage/reaction floaters
+    Notifications.ts       [P4] the SKILL ACQUIRED card and its freeze-frame
+    GrimoireScreen.ts      [P4] collection grid, filters, loadout, fusion tabs
+  data/
+    skills.json            21 skills; enemies.json: 12 kinds; fusions.json: recipes;
+    loadout.json           the starting loadout (no skill id lives in TS)
+  styles/                  game-surface + HUD/touch CSS, safe-area aware
+tools/                     six headless gates, one per phase (see Quick start)
 ```
 
 ### Phase 1 notes
@@ -136,6 +173,39 @@ tools/
 4. Lock the screen and unlock it, or switch tabs and come back: the loop pauses
    while hidden and resumes without fast-forwarding (the cube must not jump).
 5. Rotate the device: the canvas re-fits with no stretching and no black bars.
+
+## Measured — Phase 5 (headless gate)
+
+`npm run contenttest` proves the filled world in executable form. **102 checks
+pass or note honestly, 0 fail** (~5 minutes; it walks all five regions live).
+
+| Proven | How |
+|---|---|
+| **§4.1 extended to enemies** | comment-aware scan: 12 kind ids × 49 .ts files, zero hits in code — the bestiary lives in `enemies.json` |
+| Five regions, five identities | 5 probe points → 5 distinct dominant regions; ground deviation 0.0000 u over 6 241 grounded samples |
+| SpawnDirector | 30 s live walks per region: budgets 6/10/12/12/14 respected, cap 18 never hit, every sighting region-valid |
+| All 12 kinds live | each spawns with JSON hp, moves, telegraphs ≥ 0.5 s (§9), ranged kinds hit from 5.7 u stand-off, all killable |
+| Element multipliers | flame_lance vs frost_golem (weak) and ash_wraith (resist): measured == JSON-derived to 3 decimals, ratio ×3.000 |
+| **Phase 4's debt, repaid** | Shatter ×3.00 exact on an armored golem; Thermal Shock's armor-break measured through a 3-hit sequence — the multipliers Phase 4 could only NOTE are now numbers |
+| Shrines | all three challenge kinds completed end-to-end (guardian at 2.5× hp via a real CDP tap on ⚑, torch walk at real time, survive via the sanctioned time-scale hook) → Epic learned + card |
+| Fragments | walking tide_coil's three sites counts 1, 2, 3 — auto-learned exactly at 3/3 |
+| Boss Vael | dormant → P1 (damage exact) → P2 shield (plain damage ×0.15 measured; **Overload strips a layer**) → P3 (the one shield refresh) → kill → scripted Legendary + card |
+| Budgets on world walks | peak 47 draws, 77 k tris, heap 4.4 MB, **0 B/frame over 6 271 frames**, tick 60.0 |
+
+The gate found one real product bug: the smallest ranged kind (spore, a blob at
+scale 0.7) fired from a muzzle 0.41 u up while the shared projectile pool killed
+shots at `ground + 0.4` — its volleys died at the muzzle with clear line of
+sight (0/7 hits at 8 u on flat ground). Ground-kill now uses its own 0.15 u
+clearance; the player-hit radius is unchanged.
+
+Recorded, not hidden: ranged AI fires from its natural 12–14 u stand-off with no
+line-of-sight check, so across convex slopes volleys can honestly die in the
+hillside — a Phase 7 polish candidate, not a Phase 5 blocker. Pose animation is
+not on the debug surface (locomotion + screenshots stand in), and Vael's P3
+telegraph acceleration is asserted from data, not measured at runtime.
+
+**Device verification pending** — §12's Phase 5 criterion is "20 minutes of
+exploration without feeling empty or repetitive", which only a phone can judge.
 
 ## Measured — Phase 4 (headless gate)
 
