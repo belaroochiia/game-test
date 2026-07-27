@@ -336,10 +336,10 @@ function walkTs(dir, out) {
 
 /**
  * Blanks comments (block + line) while KEEPING string/template literal
- * contents — a kind string smuggled into a literal is exactly what the law
- * forbids, while "a slime (1 pt) is twice as likely" in a design comment is
- * prose, not a code path. Comment-only mentions are still reported as a NOTE
- * so nothing is silently waved through.
+ * contents. Used only to CLASSIFY hits for the failure message (a literal is
+ * a live code path, a comment is prose) — the verdict itself is skilltest's:
+ * ANY occurrence of a kind string in src/**\/*.ts fails, comments included.
+ * No exceptions.
  */
 function stripComments(src) {
   let out = '';
@@ -669,6 +669,11 @@ const REGION_FIND = (o) => {
  * within guard radius every ~1.1 s and casts the heal slot when the HUD hp
  * runs low — both defensive only, so a 30 s walk cannot end in a respawn that
  * would invalidate the region premise.
+ *
+ * Census (the anti-tautology anchor): per sample it ALSO sums budgetCost —
+ * handed in from enemies.json — over alive+active director-managed rows
+ * (row.expendable), in the SAME synchronous frame as the director() read, so
+ * the ledger can be checked against an independent count instead of itself.
  */
 const REGION_WALK = (o) => {
   const d = globalThis.__ARCANUM_DEBUG__;
@@ -690,6 +695,7 @@ const REGION_WALK = (o) => {
     const used = new Float64Array(cap);
     const capArr = new Float64Array(cap);
     const dev = new Float64Array(cap);
+    const census = new Float64Array(cap);
     let n = 0;
 
     const seen = {};
@@ -732,13 +738,21 @@ const REGION_WALK = (o) => {
       const rows = d.enemies();
 
       let aliveNow = 0;
+      let censusNow = 0;
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         if (!r.alive) continue;
         aliveNow++;
+        if (r.expendable && r.active) {
+          const cost = o.costByKind[r.kind];
+          censusNow += typeof cost === 'number' ? cost : 1000; // unknown kind poisons the census loudly
+        }
         if (seen[r.id] === undefined) {
           seen[r.id] = true;
-          sightings.push({ id: r.id, kind: r.kind, region: d.regionAt(r.x, r.z), x: Math.round(r.x), z: Math.round(r.z) });
+          sightings.push({
+            id: r.id, kind: r.kind, region: d.regionAt(r.x, r.z),
+            x: Math.round(r.x), z: Math.round(r.z), expendable: r.expendable === true,
+          });
         }
       }
       if (aliveNow > maxAlive) maxAlive = aliveNow;
@@ -754,6 +768,7 @@ const REGION_WALK = (o) => {
         alive[n] = aliveNow;
         used[n] = dir.budgetUsed;
         capArr[n] = dir.regionBudget;
+        census[n] = censusNow;
         dev[n] = p.grounded ? Math.abs(p.y - d.terrainHeightAt(p.x, p.z)) : -1;
         n++;
       }
@@ -807,6 +822,7 @@ const REGION_WALK = (o) => {
           alive: Array.from(alive.subarray(0, n)),
           budgetUsed: Array.from(used.subarray(0, n)),
           budgetCap: Array.from(capArr.subarray(0, n)),
+          census: Array.from(census.subarray(0, n)),
           deviation: Array.from(dev.subarray(0, n)),
           sightings,
           maxAlive,
@@ -843,6 +859,22 @@ const KIND_PROBE = (o) => {
       moved: 0, teleRiseT: -1, teleFallT: -1, teleCycles: 0, teleDur: -1,
       hitT: -1, distAtHit: -1, riseBeforeHitT: -1,
       killed: false, killCastAccepted: false, reason: 'init',
+      budget: { frames: 0, peakDraws: 0, peakTris: 0, peakHeap: 0, heapFirst: -1, heapLast: -1, ticksSum: 0, maxAlive: 0 },
+    };
+    const sampleBudget = () => {
+      const mm = d.metrics();
+      const bb = out.budget;
+      if (bb.frames === 0) bb.heapFirst = mm.heapMb;
+      bb.heapLast = mm.heapMb;
+      if (mm.drawCalls > bb.peakDraws) bb.peakDraws = mm.drawCalls;
+      if (mm.triangles > bb.peakTris) bb.peakTris = mm.triangles;
+      if (mm.heapMb > bb.peakHeap) bb.peakHeap = mm.heapMb;
+      bb.ticksSum += mm.ticks;
+      bb.frames++;
+      const rr = d.enemies();
+      let av = 0;
+      for (let i = 0; i < rr.length; i++) if (rr[i].alive) av++;
+      if (av > bb.maxAlive) bb.maxAlive = av;
     };
     const twoStage = o.fightDist !== o.moveDist;
     d.killAllEnemies();
@@ -883,6 +915,7 @@ const KIND_PROBE = (o) => {
     const tick = () => {
       const now = performance.now();
       const t = (now - t0) / 1000;
+      sampleBudget();
       if (now - t0 > o.timeoutMs) {
         out.reason = 'timeout(phase ' + phase + ')';
         resolve(out);
@@ -1099,6 +1132,7 @@ const MEASURED_CAST = (o) => {
       accepted: false, refusals: [], hpBefore: -1, dropAmt: -1, dropT: -1,
       namesSeen: {}, sawCard: false, statusesAfter: [], targetAlive: true,
       masteryLevel: 1, reason: 'init',
+      budget: { frames: 0, peakDraws: 0, peakTris: 0, peakHeap: 0, heapFirst: -1, heapLast: -1, ticksSum: 0, maxAlive: 0 },
     };
     for (let i = 0; i < o.watchNames.length; i++) out.namesSeen[o.watchNames[i]] = -1;
     const rowById = () => {
@@ -1106,12 +1140,28 @@ const MEASURED_CAST = (o) => {
       for (let i = 0; i < rows.length; i++) if (rows[i].id === o.targetId) return rows[i];
       return null;
     };
+    const sampleBudget = () => {
+      const mm = d.metrics();
+      const bb = out.budget;
+      if (bb.frames === 0) bb.heapFirst = mm.heapMb;
+      bb.heapLast = mm.heapMb;
+      if (mm.drawCalls > bb.peakDraws) bb.peakDraws = mm.drawCalls;
+      if (mm.triangles > bb.peakTris) bb.peakTris = mm.triangles;
+      if (mm.heapMb > bb.peakHeap) bb.peakHeap = mm.heapMb;
+      bb.ticksSum += mm.ticks;
+      bb.frames++;
+      const rr = d.enemies();
+      let av = 0;
+      for (let i = 0; i < rr.length; i++) if (rr[i].alive) av++;
+      if (av > bb.maxAlive) bb.maxAlive = av;
+    };
     const t0 = performance.now();
     let phase = 0;
     let phaseT = t0;
     let castT = -1;
     const tick = () => {
       const now = performance.now();
+      sampleBudget();
       if (now - t0 > o.timeoutMs) {
         out.reason = 'timeout(phase ' + phase + ')';
         resolve(out);
@@ -1206,17 +1256,36 @@ const MELEE_ONE = (o) => {
     return el.textContent || '';
   };
   return new Promise((resolve) => {
-    const out = { hpBefore: -1, dropAmt: -1, sawShatter: false, reason: 'init' };
+    const out = {
+      hpBefore: -1, dropAmt: -1, sawShatter: false, reason: 'init',
+      budget: { frames: 0, peakDraws: 0, peakTris: 0, peakHeap: 0, heapFirst: -1, heapLast: -1, ticksSum: 0, maxAlive: 0 },
+    };
     const rowById = () => {
       const rows = d.enemies();
       for (let i = 0; i < rows.length; i++) if (rows[i].id === o.targetId) return rows[i];
       return null;
+    };
+    const sampleBudget = () => {
+      const mm = d.metrics();
+      const bb = out.budget;
+      if (bb.frames === 0) bb.heapFirst = mm.heapMb;
+      bb.heapLast = mm.heapMb;
+      if (mm.drawCalls > bb.peakDraws) bb.peakDraws = mm.drawCalls;
+      if (mm.triangles > bb.peakTris) bb.peakTris = mm.triangles;
+      if (mm.heapMb > bb.peakHeap) bb.peakHeap = mm.heapMb;
+      bb.ticksSum += mm.ticks;
+      bb.frames++;
+      const rr = d.enemies();
+      let av = 0;
+      for (let i = 0; i < rr.length; i++) if (rr[i].alive) av++;
+      if (av > bb.maxAlive) bb.maxAlive = av;
     };
     const t0 = performance.now();
     let phase = 0;
     let phaseT = t0;
     const tick = () => {
       const now = performance.now();
+      sampleBudget();
       if (now - t0 > o.timeoutMs) {
         out.reason = 'timeout(phase ' + phase + ')';
         resolve(out);
@@ -1266,16 +1335,34 @@ const MELEE_ONE = (o) => {
 const SURVIVE_DRIVE = (o) => {
   const d = globalThis.__ARCANUM_DEBUG__;
   return new Promise((resolve) => {
-    const out = { state: 'active', sawEnemies: false, maxAlive: 0, sawCard: false, reason: 'init' };
+    const out = {
+      state: 'active', sawEnemies: false, maxAlive: 0, sawCard: false, reason: 'init',
+      budget: { frames: 0, peakDraws: 0, peakTris: 0, peakHeap: 0, heapFirst: -1, heapLast: -1, ticksSum: 0, maxAlive: 0 },
+    };
     const t0 = performance.now();
     let lastKill = t0;
     const tick = () => {
       const now = performance.now();
       const rows = d.enemies();
       let aliveNow = 0;
-      for (let i = 0; i < rows.length; i++) if (rows[i].alive && rows[i].maxHp < 1000) aliveNow++;
+      let aliveAll = 0;
+      for (let i = 0; i < rows.length; i++) {
+        if (!rows[i].alive) continue;
+        aliveAll++;
+        if (rows[i].maxHp < 1000) aliveNow++;
+      }
       if (aliveNow > 0) out.sawEnemies = true;
       if (aliveNow > out.maxAlive) out.maxAlive = aliveNow;
+      const mm = d.metrics();
+      const bb = out.budget;
+      if (bb.frames === 0) bb.heapFirst = mm.heapMb;
+      bb.heapLast = mm.heapMb;
+      if (mm.drawCalls > bb.peakDraws) bb.peakDraws = mm.drawCalls;
+      if (mm.triangles > bb.peakTris) bb.peakTris = mm.triangles;
+      if (mm.heapMb > bb.peakHeap) bb.peakHeap = mm.heapMb;
+      bb.ticksSum += mm.ticks;
+      bb.frames++;
+      if (aliveAll > bb.maxAlive) bb.maxAlive = aliveAll;
       if (!out.sawCard && document.querySelector('.notify__card.is-in') !== null) out.sawCard = true;
       if (now - lastKill >= o.killEveryMs) {
         lastKill = now;
@@ -1309,7 +1396,10 @@ const SURVIVE_DRIVE = (o) => {
 const TORCH_SPIRAL = (o) => {
   const d = globalThis.__ARCANUM_DEBUG__;
   return new Promise((resolve) => {
-    const out = { state: 'active', points: 0, sawCard: false, reason: 'init' };
+    const out = {
+      state: 'active', points: 0, sawCard: false, reason: 'init',
+      budget: { frames: 0, peakDraws: 0, peakTris: 0, peakHeap: 0, heapFirst: -1, heapLast: -1, ticksSum: 0, maxAlive: 0 },
+    };
     const pts = [];
     for (let r = 0; r < o.radii.length; r++) {
       const radius = o.radii[r];
@@ -1324,6 +1414,21 @@ const TORCH_SPIRAL = (o) => {
     const tick = () => {
       const now = performance.now();
       if (!out.sawCard && document.querySelector('.notify__card.is-in') !== null) out.sawCard = true;
+      {
+        const mm = d.metrics();
+        const bb = out.budget;
+        if (bb.frames === 0) bb.heapFirst = mm.heapMb;
+        bb.heapLast = mm.heapMb;
+        if (mm.drawCalls > bb.peakDraws) bb.peakDraws = mm.drawCalls;
+        if (mm.triangles > bb.peakTris) bb.peakTris = mm.triangles;
+        if (mm.heapMb > bb.peakHeap) bb.peakHeap = mm.heapMb;
+        bb.ticksSum += mm.ticks;
+        bb.frames++;
+        const rr = d.enemies();
+        let av = 0;
+        for (let k = 0; k < rr.length; k++) if (rr[k].alive) av++;
+        if (av > bb.maxAlive) bb.maxAlive = av;
+      }
       const info = d.shrines()[o.index];
       const state = info !== undefined ? info.state : 'missing';
       out.state = state;
@@ -1451,24 +1556,19 @@ async function main() {
     const kinds = defs.map((d) => d.kind);
     const scan = scanForKinds(kinds);
     m.kindScan = { filesScanned: scan.files, codeHits: scan.codeHits, commentHits: scan.commentHits };
+    const totalHits = scan.codeHits.length + scan.commentHits.length;
     if (scan.files < 20) {
       fail('#1 §4.1 scan covered the source tree', `only ${scan.files} .ts files under src/ — scan broken`);
-    } else if (scan.codeHits.length === 0) {
+    } else if (totalHits === 0) {
       pass(
-        '#1 §4.1 LAW: no enemy kind string in src/**/*.ts code',
-        `${kinds.length} kinds x ${scan.files} files, zero occurrences in code or literals — enemy #13 is a JSON edit`,
+        '#1 §4.1 LAW: no enemy kind string in src/**/*.ts',
+        `${kinds.length} kinds x ${scan.files} files, ZERO occurrences — code, literals or comments (skilltest's rule: any occurrence fails, no exceptions) — enemy #13 is a JSON edit`,
       );
     } else {
       fail(
-        '#1 §4.1 LAW: no enemy kind string in src/**/*.ts code',
-        `${scan.codeHits.length} occurrence(s) in CODE/LITERALS: ${scan.codeHits.slice(0, 10).join(' | ')}`,
-      );
-    }
-    if (scan.commentHits.length > 0) {
-      note(
-        '#1 kind words appear in comments only',
-        `${scan.commentHits.length} comment-only mention(s) (e.g. ${scan.commentHits[0]}) — prose, not code paths; ` +
-          'the skilltest precedent scans raw lines, so this gate reports them here instead of silently passing them',
+        '#1 §4.1 LAW: no enemy kind string in src/**/*.ts',
+        `${totalHits} occurrence(s) — ${scan.codeHits.length} in code/literals [${scan.codeHits.slice(0, 6).join(' | ')}]` +
+          `, ${scan.commentHits.length} in comments [${scan.commentHits.slice(0, 6).join(' | ')}] — the contract greps like skilltest: ANY occurrence fails`,
       );
     }
 
@@ -1553,8 +1653,14 @@ async function main() {
   // =========================================================================
   // PART 2 — the live gate.
   // =========================================================================
-  /** Aggregated §3 series across every long sampler (for #10). */
+  /** Aggregated §3 series across EVERY instrumented driver (for #10): the
+   * five region walks AND the kind probes, measured casts, shrine drives and
+   * the whole boss fight — "throughout" means throughout. */
   const budgetAgg = { frames: 0, peakDraws: 0, peakTris: 0, peakHeap: 0, firstHeap: -1, lastHeap: -1 };
+  /** Peak alive-enemy count outside the region walks (the §9 cap re-check). */
+  let capPeakElsewhere = 0;
+  /** Per-driver mean tick rates (drivers with >= 100 sampled frames). */
+  const extraTickRates = [];
   const feedBudget = (r) => {
     budgetAgg.frames += r.count;
     const pd = maxOf(r.drawCalls);
@@ -1565,6 +1671,17 @@ async function main() {
     if (ph > budgetAgg.peakHeap) budgetAgg.peakHeap = ph;
     if (budgetAgg.firstHeap < 0 && r.count > 0) budgetAgg.firstHeap = r.heapMb[0];
     if (r.count > 0) budgetAgg.lastHeap = r.heapMb[r.count - 1];
+  };
+  const feedBudgetSummary = (b) => {
+    if (b === undefined || b === null || b.frames === 0) return;
+    budgetAgg.frames += b.frames;
+    if (b.peakDraws > budgetAgg.peakDraws) budgetAgg.peakDraws = b.peakDraws;
+    if (b.peakTris > budgetAgg.peakTris) budgetAgg.peakTris = b.peakTris;
+    if (b.peakHeap > budgetAgg.peakHeap) budgetAgg.peakHeap = b.peakHeap;
+    if (budgetAgg.firstHeap < 0) budgetAgg.firstHeap = b.heapFirst;
+    budgetAgg.lastHeap = b.heapLast;
+    if (b.frames >= 100) extraTickRates.push(b.ticksSum / b.frames);
+    if (b.maxAlive > capPeakElsewhere) capPeakElsewhere = b.maxAlive;
   };
 
   try {
@@ -1637,6 +1754,23 @@ async function main() {
     m.calibration = { F: { x: round(F.x, 3), z: round(F.z, 3) }, R: { x: round(R.x, 3), z: round(R.z, 3) } };
     pass('#0 input-to-world axes calibrated', `F (${F.x.toFixed(2)}, ${F.z.toFixed(2)}), R (${R.x.toFixed(2)}, ${R.z.toFixed(2)})`);
 
+    /** Every instrumented driver flows its §3 samples into the aggregate. */
+    const runDriver = async (driverFn, opts) => {
+      const r = await page.evaluate(driverFn, opts);
+      if (r !== null && typeof r === 'object') feedBudgetSummary(r.budget);
+      return r;
+    };
+
+    // The boss is adopted into the manager at boot; its IDENTITY (id) is the
+    // exemption key for population checks — never a position waiver.
+    const bossId = await page.evaluate(() => {
+      const rows = globalThis.__ARCANUM_DEBUG__.enemies();
+      for (const r of rows) if (r.maxHp >= 1000) return r.id;
+      return -1;
+    });
+    if (bossId >= 0) pass('#0 boss row identified for exemption-by-identity', `enemy id ${bossId} (maxHp >= 1000)`);
+    else fail('#0 boss row identified for exemption-by-identity', 'no enemies() row with maxHp >= 1000 at boot');
+
     const healSlot = 3;
     const healIfLow = async (threshold) => {
       const hp = await page.evaluate(() => {
@@ -1653,6 +1787,12 @@ async function main() {
       page
         .waitForFunction(() => document.querySelector('.notify__card.is-in') === null, null, { timeout: 9000 })
         .catch(() => {});
+    /** In-driver sampling can beat the card's DOM by a frame — poll it out. */
+    const cardVisible = () =>
+      page
+        .waitForFunction(() => document.querySelector('.notify__card.is-in') !== null, null, { timeout: 4000 })
+        .then(() => true)
+        .catch(() => false);
 
     // =======================================================================
     // #2 — all five regions reachable and distinct.
@@ -1723,11 +1863,14 @@ async function main() {
           d.clearInput();
           d.pauseDirector(false);
         });
+        const costByKind = {};
+        for (const d of defs) costByKind[d.kind] = d.budgetCost;
         const walk = await page.evaluate(REGION_WALK, {
           cx: probePt.x, cz: probePt.z, radius: WALK_RADIUS,
           durationMs: REGION_WALK_MS,
           fx: F.x, fz: F.z, rx: R.x, rz: R.z,
           guardRadius: 9, healBelow: 150, healSlot,
+          costByKind,
         });
         // Screenshot with the region population still standing.
         const shotName = `contenttest-${REGION_NAMES[r]}.png`;
@@ -1751,15 +1894,15 @@ async function main() {
         if (regionWorst > worstDeviation) worstDeviation = regionWorst;
 
         // Kind validity: every sighting's def must be tagged for the dominant
-        // region at FIRST sight (spawn-fresh attribution). The dormant boss is
-        // adopted into the manager and shows up in Spire — identified by hp
-        // scale, not by kind string.
+        // region at FIRST sight (spawn-fresh attribution). The ONE exemption
+        // is the adopted boss, by IDENTITY (its enemy id) — never by position,
+        // so a bogus kind near the arena still fails.
         const badKinds = [];
         let directorSightings = 0;
         for (const s of walk.sightings) {
+          if (s.id === bossId) continue;
           const def = defByKind.get(s.kind);
           if (def === undefined) {
-            if (s.kind === picks.bossKindSeen || Math.hypot(s.x - VAEL.arenaX, s.z - VAEL.arenaZ) < 40) continue; // the dormant boss
             badKinds.push(`${s.kind}@(${s.x},${s.z}) is not an enemies.json kind`);
             continue;
           }
@@ -1768,6 +1911,26 @@ async function main() {
             badKinds.push(`${s.kind}@(${s.x},${s.z}) sighted in region ${s.region}, tagged for [${def.biomes.join(',')}]`);
           }
         }
+
+        // The anti-tautology census (#3): the director's ledger vs an
+        // independent per-frame sum of budgetCost over alive+active
+        // director-managed rows, both read in the SAME frame. Tolerance: the
+        // ledger only re-syncs on the ~2 s cadence (stale currentRegion for
+        // the walk's opening seconds) and a border wander can charge a spawn
+        // to the neighbour region — so equality is required on a robust 80%
+        // majority, while the CONTRACT cap binds the census on every sample.
+        let censusMatches = 0;
+        let censusWorstDiff = 0;
+        let censusPeak = 0;
+        let censusCapViolations = 0;
+        for (let i = 0; i < walk.count; i++) {
+          const diff = Math.abs(walk.budgetUsed[i] - walk.census[i]);
+          if (diff === 0) censusMatches++;
+          if (diff > censusWorstDiff) censusWorstDiff = diff;
+          if (walk.census[i] > censusPeak) censusPeak = walk.census[i];
+          if (walk.census[i] > REGION_BUDGET[r]) censusCapViolations++;
+        }
+        const censusMatchFraction = walk.count > 0 ? censusMatches / walk.count : 0;
 
         const summary = {
           region: REGION_NAMES[r],
@@ -1779,6 +1942,10 @@ async function main() {
           overBudgetSamples: walk.overBudgetSamples,
           maxBudgetUsed: maxOf(walk.budgetUsed),
           budgetCap: walk.budgetCap.length > 0 ? walk.budgetCap[walk.budgetCap.length - 1] : -1,
+          censusPeak,
+          censusMatchFraction: round(censusMatchFraction, 3),
+          censusWorstDiff,
+          censusCapViolations,
           worstDeviation: round(regionWorst, 4),
           healCasts: walk.healCasts,
           died: walk.died,
@@ -1796,10 +1963,16 @@ async function main() {
         }
         if (walk.maxAlive <= ENEMY_CAP) pass(`#3 cap 18 held in ${REGION_NAMES[r]}`, `max alive ${walk.maxAlive}`);
         else fail(`#3 cap 18 held in ${REGION_NAMES[r]}`, `max alive ${walk.maxAlive} > ${ENEMY_CAP}`);
-        if (walk.overBudgetSamples === 0) {
-          pass(`#3 budget respected in ${REGION_NAMES[r]}`, `peak ${summary.maxBudgetUsed}/${summary.budgetCap} points`);
+        // Independent census vs the CONTRACT cap — never the ledger vs itself.
+        if (censusCapViolations === 0 && walk.count > 0) {
+          pass(`#3 budget respected in ${REGION_NAMES[r]} (independent census)`, `peak ${censusPeak}/${REGION_BUDGET[r]} points, summed from enemies.json costs over live director rows (ledger peak ${summary.maxBudgetUsed})`);
         } else {
-          fail(`#3 budget respected in ${REGION_NAMES[r]}`, `${walk.overBudgetSamples} sample(s) over budget (peak ${summary.maxBudgetUsed}/${summary.budgetCap})`);
+          fail(`#3 budget respected in ${REGION_NAMES[r]} (independent census)`, `${censusCapViolations} sample(s) over the contract cap ${REGION_BUDGET[r]} (census peak ${censusPeak})`);
+        }
+        if (censusMatchFraction >= 0.8) {
+          pass(`#3 director ledger matches the census in ${REGION_NAMES[r]}`, `${(censusMatchFraction * 100).toFixed(1)}% of ${walk.count} samples equal (worst diff ${censusWorstDiff} pts; cadence staleness and border wander explain the rest)`);
+        } else {
+          fail(`#3 director ledger matches the census in ${REGION_NAMES[r]}`, `only ${(censusMatchFraction * 100).toFixed(1)}% of samples equal (worst diff ${censusWorstDiff}) — the ledger does not track reality`);
         }
         if (badKinds.length === 0) pass(`#3 only region-valid kinds in ${REGION_NAMES[r]}`, `${walk.sightings.length} sightings clean`);
         else fail(`#3 only region-valid kinds in ${REGION_NAMES[r]}`, badKinds.slice(0, 6).join(' | '));
@@ -1827,7 +2000,7 @@ async function main() {
         await waitNoCard();
         await healIfLow(190);
         const dist = spawnDistanceFor(def);
-        const probeRes = await page.evaluate(KIND_PROBE, {
+        const probeRes = await runDriver(KIND_PROBE, {
           kind: def.kind,
           ax: 0, az: 0, fx: F.x, fz: F.z,
           moveDist: dist.move,
@@ -1890,7 +2063,7 @@ async function main() {
         await healIfLow(180);
         const target = await page.evaluate(SPAWN_TARGET, { kind: def.kind, ax: 0, az: 0, fx: F.x, fz: F.z, dist: 8 });
         if (target === null) return null;
-        return page.evaluate(MEASURED_CAST, {
+        return runDriver(MEASURED_CAST, {
           targetId: target.id, skillId: skill.id, slot: 0,
           statusSeed, damageSeed: seeds.nonCrit,
           freezeSeconds: 0, useOffset: false, offX: 0, offZ: 0, faceMs: 160,
@@ -1909,14 +2082,14 @@ async function main() {
       if (weak === null || !weak.accepted || weak.dropAmt < 0) {
         fail('#5 weak target takes x1.5', `no measured hit (${weak !== null ? weak.reason : 'spawn failed'})`);
       } else if (Math.abs(weak.dropAmt - expWeak) <= 0.9) {
-        pass('#5 weak target takes x1.5', `${skill.id} on ${trio.weakDef.kind}: ${weak.dropAmt.toFixed(2)} = (${expDmg(skill).toFixed(1)}) x1.5 x mit(${trio.weakDef.armor})`);
+        pass('#5 weak target takes x1.5', `${skill.id} on ${trio.weakDef.kind}: ${weak.dropAmt.toFixed(2)} == expected ${expWeak.toFixed(2)} (x1.5, mit(${trio.weakDef.armor}), mastery L${weak.masteryLevel})`);
       } else {
         fail('#5 weak target takes x1.5', `${skill.id} on ${trio.weakDef.kind}: measured ${weak.dropAmt.toFixed(3)}, expected ${expWeak.toFixed(3)}`);
       }
       if (resist === null || !resist.accepted || resist.dropAmt < 0) {
         fail('#5 resistant target takes x0.5', `no measured hit (${resist !== null ? resist.reason : 'spawn failed'})`);
       } else if (Math.abs(resist.dropAmt - expResist) <= 0.9) {
-        pass('#5 resistant target takes x0.5', `${skill.id} on ${trio.resistDef.kind}: ${resist.dropAmt.toFixed(2)} = (${expDmg(skill).toFixed(1)}) x0.5 x mit(${trio.resistDef.armor})`);
+        pass('#5 resistant target takes x0.5', `${skill.id} on ${trio.resistDef.kind}: ${resist.dropAmt.toFixed(2)} == expected ${expResist.toFixed(2)} (x0.5, mit(${trio.resistDef.armor}), mastery L${resist.masteryLevel})`);
       } else {
         fail('#5 resistant target takes x0.5', `${skill.id} on ${trio.resistDef.kind}: measured ${resist.dropAmt.toFixed(3)}, expected ${expResist.toFixed(3)}`);
       }
@@ -1942,14 +2115,14 @@ async function main() {
       {
         const t1 = await page.evaluate(SPAWN_TARGET, { kind: golem.kind, ax: 0, az: 0, fx: F.x, fz: F.z, dist: 2.2 });
         if (t1 !== null) {
-          baseline = await page.evaluate(MELEE_ONE, {
+          baseline = await runDriver(MELEE_ONE, {
             targetId: t1.id, fx: F.x, fz: F.z, damageSeed: seeds.nonCrit, freezeSeconds: 0, windowMs: 1600, timeoutMs: 8000,
           });
         }
         await healIfLow(160);
         const t2 = await page.evaluate(SPAWN_TARGET, { kind: golem.kind, ax: 0, az: 0, fx: F.x, fz: F.z, dist: 2.2 });
         if (t2 !== null) {
-          shattered = await page.evaluate(MELEE_ONE, {
+          shattered = await runDriver(MELEE_ONE, {
             targetId: t2.id, fx: F.x, fz: F.z, damageSeed: seeds.nonCrit, freezeSeconds: 6, windowMs: 1600, timeoutMs: 8000,
           });
         }
@@ -1982,19 +2155,19 @@ async function main() {
       let dropB = null;
       let dropC = null;
       if (target !== null) {
-        dropA = await page.evaluate(MEASURED_CAST, {
+        dropA = await runDriver(MEASURED_CAST, {
           targetId: target.id, skillId: wind.id, slot: 0,
           statusSeed: seeds.statusMiss, damageSeed: seeds.nonCrit,
           freezeSeconds: 5, useOffset: true, offX: -F.x * 7, offZ: -F.z * 7, faceMs: 160,
           acceptMs: 7000, windowMs: 2200, timeoutMs: 16_000, watchNames: [],
         });
-        dropB = await page.evaluate(MEASURED_CAST, {
+        dropB = await runDriver(MEASURED_CAST, {
           targetId: target.id, skillId: fire.id, slot: 1,
           statusSeed: seeds.statusMiss, damageSeed: seeds.nonCrit,
           freezeSeconds: 0, useOffset: true, offX: -F.x * 7, offZ: -F.z * 7, faceMs: 140,
           acceptMs: 7000, windowMs: 2200, timeoutMs: 16_000, watchNames: ['Thermal Shock'],
         });
-        dropC = await page.evaluate(MEASURED_CAST, {
+        dropC = await runDriver(MEASURED_CAST, {
           targetId: target.id, skillId: wind.id, slot: 0,
           statusSeed: seeds.statusMiss, damageSeed: seeds.nonCrit,
           freezeSeconds: 4, useOffset: true, offX: -F.x * 7, offZ: -F.z * 7, faceMs: 140,
@@ -2149,7 +2322,7 @@ async function main() {
               fail('#7 guardian spawns buffed', `${guardian.kind} hp ${guardian.hp} (x${hpMult.toFixed(2)} of def), regionValid=${regionOk}`);
             }
             // Real-kill flow: freeze, drop hp, one seeded cast.
-            const kill = await page.evaluate(MEASURED_CAST, {
+            const kill = await runDriver(MEASURED_CAST, {
               targetId: guardian.id, skillId: picks.killSkill.id, slot: 0,
               statusSeed: seeds.statusMiss, damageSeed: seeds.nonCrit,
               freezeSeconds: 8, useOffset: true, offX: -F.x * 4.5, offZ: -F.z * 4.5, faceMs: 160,
@@ -2157,7 +2330,7 @@ async function main() {
             });
             await page.evaluate((id) => globalThis.__ARCANUM_DEBUG__.setEnemyHp(id, 3), guardian.id);
             const kill2 = kill.targetAlive
-              ? await page.evaluate(MEASURED_CAST, {
+              ? await runDriver(MEASURED_CAST, {
                   targetId: guardian.id, skillId: picks.killSkill.id, slot: 0,
                   statusSeed: seeds.statusMiss, damageSeed: seeds.nonCrit,
                   freezeSeconds: 6, useOffset: true, offX: -F.x * 4.5, offZ: -F.z * 4.5, faceMs: 140,
@@ -2170,11 +2343,12 @@ async function main() {
               .catch(() => false);
             const reward = picks.shrineSkills.get(shrine.element);
             const known = await knownIds();
-            const sawCard = kill.sawCard || (kill2 !== null && kill2.sawCard) || (await page.evaluate(() => document.querySelector('.notify__card.is-in') !== null));
-            if (done && reward !== undefined && known.includes(reward.id)) {
-              pass('#7 guardian kill completes the shrine and teaches its Epic', `${shrine.element} shrine done, learned ${reward.id}, card=${sawCard}`);
+            const sawCard = kill.sawCard || (kill2 !== null && kill2.sawCard) || (await cardVisible());
+            // "Epic learned, CARD SHOWN" — the card is part of the contract.
+            if (done && reward !== undefined && known.includes(reward.id) && sawCard) {
+              pass('#7 guardian kill completes the shrine and teaches its Epic', `${shrine.element} shrine done, learned ${reward.id}, ACQUIRED card shown`);
             } else {
-              fail('#7 guardian kill completes the shrine and teaches its Epic', `done=${done}, reward=${reward !== undefined ? reward.id : 'none'}, known=${known.length}`);
+              fail('#7 guardian kill completes the shrine and teaches its Epic', `done=${done}, reward=${reward !== undefined ? reward.id : 'none'}, known=${known.length}, cardShown=${sawCard}`);
             }
           }
         }
@@ -2189,7 +2363,7 @@ async function main() {
         if (!start.active) {
           fail('#7 torch challenge starts', `state never went active (icon "${String(start.pre.icon)}")`);
         } else {
-          const spiral = await page.evaluate(TORCH_SPIRAL, {
+          const spiral = await runDriver(TORCH_SPIRAL, {
             index, sx: shrine.x, sz: shrine.z,
             radii: [8.3, 9.5, 10.7, 11.9, 13.1, 14.2],
             stepU: 1.0,
@@ -2197,11 +2371,12 @@ async function main() {
           });
           const reward = picks.shrineSkills.get(shrine.element);
           const known = await knownIds();
-          m.torchSpiral = { points: spiral.points, state: spiral.state, reason: spiral.reason };
-          if (spiral.state === 'done' && reward !== undefined && known.includes(reward.id)) {
-            pass('#7 lighting 4 torches completes the shrine', `${shrine.element} shrine done after ${spiral.points} sweep points, learned ${reward.id}, card=${spiral.sawCard}`);
+          const torchCard = spiral.sawCard || (await cardVisible());
+          m.torchSpiral = { points: spiral.points, state: spiral.state, reason: spiral.reason, cardShown: torchCard };
+          if (spiral.state === 'done' && reward !== undefined && known.includes(reward.id) && torchCard) {
+            pass('#7 lighting 4 torches completes the shrine', `${shrine.element} shrine done after ${spiral.points} sweep points, learned ${reward.id}, ACQUIRED card shown`);
           } else {
-            fail('#7 lighting 4 torches completes the shrine', `state ${spiral.state} (${spiral.reason}), reward known=${reward !== undefined && known.includes(reward.id)}`);
+            fail('#7 lighting 4 torches completes the shrine', `state ${spiral.state} (${spiral.reason}), reward known=${reward !== undefined && known.includes(reward.id)}, cardShown=${torchCard}`);
           }
         }
       }
@@ -2216,15 +2391,25 @@ async function main() {
         if (!start.active) {
           fail('#7 survive challenge starts', `state never went active (icon "${String(start.pre.icon)}")`);
         } else {
-          const survive = await page.evaluate(SURVIVE_DRIVE, { index, killEveryMs: 1500, timeoutMs: 30_000 });
+          const survive = await runDriver(SURVIVE_DRIVE, { index, killEveryMs: 1500, timeoutMs: 30_000 });
           await page.evaluate(() => globalThis.__ARCANUM_DEBUG__.shrineTimeScale(1));
           const reward = picks.shrineSkills.get(shrine.element);
           const known = await knownIds();
-          m.survive = { state: survive.state, sawEnemies: survive.sawEnemies, maxAlive: survive.maxAlive };
-          if (survive.state === 'done' && survive.sawEnemies && reward !== undefined && known.includes(reward.id)) {
-            pass('#7 survive60 completes under pressure', `${shrine.element} shrine done (timeScale 6, ~10 s real), waves spawned (peak ${survive.maxAlive} alive), learned ${reward.id}, card=${survive.sawCard}`);
+          const surviveCard = survive.sawCard || (await cardVisible());
+          m.survive = { state: survive.state, sawEnemies: survive.sawEnemies, maxAlive: survive.maxAlive, maxAliveTotal: survive.budget.maxAlive, cardShown: surviveCard };
+          // §9's cap is a re-check invariant — enforced in the game's
+          // highest-pressure scene, and the card is part of the contract.
+          if (
+            survive.state === 'done' &&
+            survive.sawEnemies &&
+            survive.maxAlive <= ENEMY_CAP &&
+            reward !== undefined &&
+            known.includes(reward.id) &&
+            surviveCard
+          ) {
+            pass('#7 survive60 completes under pressure', `${shrine.element} shrine done (timeScale 6, ~10 s real), waves spawned (peak ${survive.maxAlive} alive <= ${ENEMY_CAP}), learned ${reward.id}, ACQUIRED card shown`);
           } else {
-            fail('#7 survive60 completes under pressure', `state ${survive.state} (${survive.reason}), sawEnemies=${survive.sawEnemies}, reward known=${reward !== undefined && known.includes(reward.id)}`);
+            fail('#7 survive60 completes under pressure', `state ${survive.state} (${survive.reason}), sawEnemies=${survive.sawEnemies}, maxAlive=${survive.maxAlive} (cap ${ENEMY_CAP}), reward known=${reward !== undefined && known.includes(reward.id)}, cardShown=${surviveCard}`);
           }
           note('#7 survive60 was time-compressed', 'shrineTimeScale(6) shrank the 60 s clock to ~10 s real; waves, the 25 u radius rule and the reward flow all ran for real (the contract offers exactly this compression)');
         }
@@ -2280,13 +2465,15 @@ async function main() {
         counts.push({ taken, count: state.count, known: state.known });
         if (state.card) sawCard = true;
       }
-      m.fragmentRun = { skill: targetId, counts };
+      const fragCard = sawCard || (await cardVisible());
+      m.fragmentRun = { skill: targetId, counts, cardShown: fragCard };
       const countsOk = counts.length === 3 && counts.every((c, i) => c.taken && c.count === i + 1);
       const learned = counts.length === 3 && counts[2].known && !counts[0].known && !counts[1].known;
-      if (countsOk && learned) {
-        pass('#8 walking into 3 sites assembles the skill', `${targetId}: counts 1,2,3 -> learned exactly at 3/3, card=${sawCard}`);
+      // "auto-assembled, CARD" — the ACQUIRED moment is part of the contract.
+      if (countsOk && learned && fragCard) {
+        pass('#8 walking into 3 sites assembles the skill', `${targetId}: counts 1,2,3 -> learned exactly at 3/3, ACQUIRED card shown`);
       } else {
-        fail('#8 walking into 3 sites assembles the skill', `${targetId}: ${JSON.stringify(counts)} (card=${sawCard})`);
+        fail('#8 walking into 3 sites assembles the skill', `${targetId}: ${JSON.stringify(counts)} (cardShown=${fragCard})`);
       }
     }
 
@@ -2353,7 +2540,7 @@ async function main() {
       const bid = bossRow.id;
       const gale = picks.windPlain; // wind: mult 1 vs Vael, reaction-free on a frozen boss
       const bossCast = (skillId, slot, opts = {}) =>
-        page.evaluate(MEASURED_CAST, {
+        runDriver(MEASURED_CAST, {
           targetId: bid, skillId, slot,
           statusSeed: opts.statusSeed ?? seeds.statusMiss,
           damageSeed: seeds.nonCrit,
@@ -2467,13 +2654,15 @@ async function main() {
         const name = card !== null ? card.querySelector('.notify__name') : null;
         return { card: card !== null, name: name !== null ? name.textContent : '' };
       });
-      m.bossKill = { deadState, rewardKnown, card: cardInfo, killDrop: killCast.dropAmt >= 0 ? round(killCast.dropAmt, 2) : null };
+      const bossCard = cardInfo.card || killCast.sawCard || (await cardVisible());
+      m.bossKill = { deadState, rewardKnown, card: cardInfo, cardShown: bossCard, killDrop: killCast.dropAmt >= 0 ? round(killCast.dropAmt, 2) : null };
       if (deadState && killCast.accepted) pass('#9 the kill lands through a real cast', `boss hp <= 0 after ${gale.id} (drop ${killCast.dropAmt >= 0 ? killCast.dropAmt.toFixed(2) : 'overkill'})`);
       else fail('#9 the kill lands through a real cast', `dead=${deadState}, cast ${killCast.reason}`);
-      if (rewardKnown && !knownBefore.includes(bossReward.id)) {
-        pass('#9 scripted Legendary learned on the kill', `${bossReward.id} (bossReward marker), ACQUIRED card=${cardInfo.card || killCast.sawCard}`);
+      // The Legendary AND its ACQUIRED card — §8.2.4's moment is the contract.
+      if (rewardKnown && !knownBefore.includes(bossReward.id) && bossCard) {
+        pass('#9 scripted Legendary learned on the kill', `${bossReward.id} (bossReward marker), ACQUIRED card shown${cardInfo.name !== '' ? ` ("${cardInfo.name}")` : ''}`);
       } else {
-        fail('#9 scripted Legendary learned on the kill', `known=${rewardKnown}, was already known=${knownBefore.includes(bossReward.id)}`);
+        fail('#9 scripted Legendary learned on the kill', `known=${rewardKnown}, was already known=${knownBefore.includes(bossReward.id)}, cardShown=${bossCard}`);
       }
       note(
         '#9 boss hp compressed between phases',
@@ -2493,26 +2682,36 @@ async function main() {
         heapFirstMb: round(budgetAgg.firstHeap, 2),
         heapLastMb: round(budgetAgg.lastHeap, 2),
         tickRates: tickRates.map((t) => round(t, 1)),
+        extraTickRates: extraTickRates.map((t) => round(t, 1)),
+        capPeakElsewhere,
       };
+      // "THROUGHOUT" = walks + kind probes + measured casts + shrine drives +
+      // the whole boss fight; the drift window runs from the first walk sample
+      // to the LAST driver's final sample (the boss kill).
       if (budgetAgg.frames < 1000) {
         unknown('#10 budgets sampled throughout', `only ${budgetAgg.frames} sampled frames`);
       } else {
-        if (budgetAgg.peakDraws <= BUDGET.drawCalls) pass('#10 draw calls <= 110 across all five region walks', `peak ${budgetAgg.peakDraws} over ${budgetAgg.frames} frames`);
-        else fail('#10 draw calls <= 110 across all five region walks', `peak ${budgetAgg.peakDraws}`);
-        if (budgetAgg.peakTris <= BUDGET.triangles) pass('#10 triangles <= 150000 across the run', `peak ${budgetAgg.peakTris}`);
-        else fail('#10 triangles <= 150000 across the run', `peak ${budgetAgg.peakTris}`);
-        if (budgetAgg.peakHeap <= BUDGET.heapMb) pass('#10 heap <= 280 MB', `peak ${budgetAgg.peakHeap.toFixed(1)} MB`);
-        else fail('#10 heap <= 280 MB', `peak ${budgetAgg.peakHeap.toFixed(1)} MB`);
+        if (budgetAgg.peakDraws <= BUDGET.drawCalls) pass('#10 draw calls <= 110 throughout (walks+probes+shrines+boss)', `peak ${budgetAgg.peakDraws} over ${budgetAgg.frames} frames`);
+        else fail('#10 draw calls <= 110 throughout (walks+probes+shrines+boss)', `peak ${budgetAgg.peakDraws}`);
+        if (budgetAgg.peakTris <= BUDGET.triangles) pass('#10 triangles <= 150000 throughout', `peak ${budgetAgg.peakTris}`);
+        else fail('#10 triangles <= 150000 throughout', `peak ${budgetAgg.peakTris}`);
+        if (budgetAgg.peakHeap <= BUDGET.heapMb) pass('#10 heap <= 280 MB throughout', `peak ${budgetAgg.peakHeap.toFixed(1)} MB`);
+        else fail('#10 heap <= 280 MB throughout', `peak ${budgetAgg.peakHeap.toFixed(1)} MB`);
         const driftBytes = ((budgetAgg.lastHeap - budgetAgg.firstHeap) * 1024 * 1024) / budgetAgg.frames;
         m.budgetAggregate.heapBytesPerFrame = Math.round(driftBytes);
         if (driftBytes < HEAP_BYTES_PER_FRAME) {
-          pass('#10 heap drift < 4 KB/frame over the streaming+spawning run', `${driftBytes.toFixed(0)} B/frame across ${budgetAgg.frames} frames of five-region streaming`);
+          pass('#10 heap drift < 4 KB/frame, first walk sample to boss kill', `${driftBytes.toFixed(0)} B/frame across ${budgetAgg.frames} sampled frames`);
         } else {
-          fail('#10 heap drift < 4 KB/frame over the streaming+spawning run', `${driftBytes.toFixed(0)} B/frame — something retains per frame`);
+          fail('#10 heap drift < 4 KB/frame, first walk sample to boss kill', `${driftBytes.toFixed(0)} B/frame — something retains per frame`);
         }
         const badTicks = tickRates.filter((t) => Math.abs(t - 60) > 6);
         if (badTicks.length === 0) pass('#10 fixed tick ~60/s in every region walk', tickRates.map((t) => t.toFixed(1)).join(', '));
         else fail('#10 fixed tick ~60/s in every region walk', tickRates.map((t) => t.toFixed(1)).join(', '));
+        const badExtra = extraTickRates.filter((t) => Math.abs(t - 60) > 6);
+        if (badExtra.length === 0) pass('#10 fixed tick ~60/s across probes, shrines and the boss', `${extraTickRates.length} driver means, ${extraTickRates.length > 0 ? Math.min(...extraTickRates).toFixed(1) + '-' + Math.max(...extraTickRates).toFixed(1) : 'n/a'} /s`);
+        else fail('#10 fixed tick ~60/s across probes, shrines and the boss', badExtra.map((t) => t.toFixed(1)).join(', '));
+        if (capPeakElsewhere <= ENEMY_CAP) pass('#10 cap 18 held across probes, shrines and the boss', `peak ${capPeakElsewhere} alive outside the walks`);
+        else fail('#10 cap 18 held across probes, shrines and the boss', `peak ${capPeakElsewhere} alive > ${ENEMY_CAP}`);
       }
     }
 
@@ -2576,15 +2775,19 @@ function printSummary() {
   console.log('ARCANUM DRIFT — PHASE 5 CONTENT GATE');
   console.log('='.repeat(78));
 
-  console.log('\n§4.1 LAW (ENEMY KINDS)');
+  console.log('\n§4.1 LAW (ENEMY KINDS — any occurrence fails, comments included)');
   const scan = m.kindScan ?? {};
-  row('kind hits in src/**/*.ts CODE', (scan.codeHits ?? ['?']).length, '0 — enemy #13 is a JSON edit');
-  row('comment-only mentions', (scan.commentHits ?? []).length, 'reported, non-fatal (prose)');
+  row('kind hits in code/literals', (scan.codeHits ?? ['?']).length, '0 — enemy #13 is a JSON edit');
+  row('kind hits in comments', (scan.commentHits ?? ['?']).length, '0 — same rule as skilltest');
   row('.ts files scanned', scan.filesScanned ?? '-', '> 20');
 
-  console.log('\nDIRECTOR (per region: spawns / max alive / peak budget)');
+  console.log('\nDIRECTOR (per region: spawns / max alive / census peak:cap / ledger match)');
   for (const w of m.regionWalks ?? []) {
-    row(w.region, `${w.spawnedDelta} / ${w.maxAlive} / ${w.maxBudgetUsed}:${w.budgetCap}`, `alive <= 18, budget <= cap, kinds [${w.kinds.join(',')}]`);
+    row(
+      w.region,
+      `${w.spawnedDelta} / ${w.maxAlive} / ${w.censusPeak}:${w.budgetCap} / ${Math.round((w.censusMatchFraction ?? 0) * 100)}%`,
+      `alive <= 18, census <= cap, kinds [${w.kinds.join(',')}]`,
+    );
   }
 
   console.log('\nELEMENT MULTIPLIER / DEBT');
@@ -2605,13 +2808,14 @@ function printSummary() {
   row('reaction strip', bs.shieldBefore !== undefined ? `${bs.shieldBefore} -> ${bs.shieldAfter}` : '-', 'one layer per reaction');
   row('grace hit', bs.graceHit ?? '-', `expected ${bs.graceExpected ?? '-'} (undampened)`);
 
-  console.log('\nBUDGETS (§3, sampled across all five region walks)');
+  console.log('\nBUDGETS (§3, sampled THROUGHOUT: walks + probes + shrines + boss)');
   const ba = m.budgetAggregate ?? {};
   row('draw calls (peak)', ba.peakDrawCalls ?? '-', '<= 110');
   row('triangles (peak)', ba.peakTriangles ?? '-', '<= 150000');
   row('heap (peak)', (ba.peakHeapMb ?? '-') + ' MB', '<= 280');
-  row('heap drift', (ba.heapBytesPerFrame ?? '-') + ' B/frame', `< ${HEAP_BYTES_PER_FRAME}`);
+  row('heap drift', (ba.heapBytesPerFrame ?? '-') + ' B/frame', `< ${HEAP_BYTES_PER_FRAME} (walk 1 -> boss kill)`);
   row('frames sampled', ba.framesSampled ?? '-', '> 1000');
+  row('cap outside walks (peak alive)', ba.capPeakElsewhere ?? '-', '<= 18');
 
   console.log('\nCHECKS');
   for (const check of report.checks) {

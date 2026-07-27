@@ -367,8 +367,8 @@ export class SpawnDirector implements System {
 
   /**
    * Seeded weighted pick among the region's kinds that FIT the remaining
-   * headroom. Weight 1/budgetCost: in Verdant a slime (1 pt) is twice as
-   * likely as a wolf pup (2 pts) — crowds stay cheap, heavies stay events —
+   * headroom. Weight 1/budgetCost: in Verdant a 1-pt kind is twice as
+   * likely as a 2-pt kind — crowds stay cheap, heavies stay events —
    * and the last points in a budget go to the small kinds by construction.
    */
   private pickDef(region: number, headroom: number): EnemyDef | null {

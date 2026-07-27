@@ -510,6 +510,10 @@ interface DebugEnemy {
   state: number;
   telegraphing: boolean;
   alive: boolean;
+  /** §9 despawn-hysteresis flag (within 80/90 u of the player). */
+  active: boolean;
+  /** True for director-managed spawns — the Phase 5 gate's census key. */
+  expendable: boolean;
 }
 
 interface DebugCombat {
@@ -1080,6 +1084,8 @@ function main(): void {
           state: enemy.brain.state,
           telegraphing: enemy.brain.telegraphing,
           alive: enemy.alive,
+          active: enemy.active,
+          expendable: enemy.expendable,
         });
       }
       return list;

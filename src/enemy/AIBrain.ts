@@ -70,7 +70,7 @@ const PHASE_RECOVER = 2;
 
 export class AIBrain {
   /**
-   * Enter Flee below this hp fraction. 0 disables — the slime never flees, but
+   * Enter Flee below this hp fraction. 0 disables — the baseline blob never flees, but
    * the state machine supports it because a later enemy will (contract).
    */
   fleeHpFraction = 0;
@@ -310,7 +310,7 @@ export class AIBrain {
       ax /= len;
       az /= len;
     } else {
-      // Player standing inside the slime: strike along current facing.
+      // Player standing inside the enemy: strike along current facing.
       ax = Math.sin(self.yaw);
       az = -Math.cos(self.yaw);
     }

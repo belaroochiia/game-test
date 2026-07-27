@@ -10,10 +10,10 @@ import { AI_STATE, AI_STATE_NAMES, AIBrain, LUNGE_DISTANCE, STRIKE_SECONDS } fro
  * Concrete state, abstract visuals: this class owns hp, position, velocity,
  * knockback, stagger, ground clamping and death/respawn bookkeeping; a subclass
  * owns only the mesh and how the numbers read on screen. That is the same seam
- * PlayerAvatar drew in §5 — swapping a slime for a rigged GLTF later touches
+ * PlayerAvatar drew in §5 — swapping a blocky enemy for a rigged GLTF later touches
  * one subclass.
  *
- * No SpatialHash against props (contract: slimes pass through bushes — at 18
+ * No SpatialHash against props (contract: enemies pass through bushes — at 18
  * enemies simplicity wins), but ALWAYS clamped to the analytic terrain height,
  * so an enemy can never float or tunnel no matter what shoved it.
  */

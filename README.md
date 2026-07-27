@@ -176,21 +176,24 @@ tools/                     six headless gates, one per phase (see Quick start)
 
 ## Measured — Phase 5 (headless gate)
 
-`npm run contenttest` proves the filled world in executable form. **102 checks
+`npm run contenttest` proves the filled world in executable form. **109 checks
 pass or note honestly, 0 fail** (~5 minutes; it walks all five regions live).
+The gate itself survived an adversarial four-lens review (tautology, contract
+coverage, false-pass harness bugs, product-fix side effects) — ten raw findings,
+all fixed before this count.
 
 | Proven | How |
 |---|---|
-| **§4.1 extended to enemies** | comment-aware scan: 12 kind ids × 49 .ts files, zero hits in code — the bestiary lives in `enemies.json` |
+| **§4.1 extended to enemies** | strict scan, same rule as skills: 12 kind ids × 49 .ts files, **zero occurrences — code, string literals or comments** |
 | Five regions, five identities | 5 probe points → 5 distinct dominant regions; ground deviation 0.0000 u over 6 241 grounded samples |
-| SpawnDirector | 30 s live walks per region: budgets 6/10/12/12/14 respected, cap 18 never hit, every sighting region-valid |
+| SpawnDirector, independently audited | 30 s live walks per region: the director's ledger is cross-checked against an **independent census** (Σ `budgetCost` over the live population, unknown kinds poison the sum) — census ≤ contract cap on every sample, ledger == census on ≥ 94.9 % of samples; cap 18 never hit; every sighting region-valid, boss exempted by identity not position |
 | All 12 kinds live | each spawns with JSON hp, moves, telegraphs ≥ 0.5 s (§9), ranged kinds hit from 5.7 u stand-off, all killable |
 | Element multipliers | flame_lance vs frost_golem (weak) and ash_wraith (resist): measured == JSON-derived to 3 decimals, ratio ×3.000 |
 | **Phase 4's debt, repaid** | Shatter ×3.00 exact on an armored golem; Thermal Shock's armor-break measured through a 3-hit sequence — the multipliers Phase 4 could only NOTE are now numbers |
-| Shrines | all three challenge kinds completed end-to-end (guardian at 2.5× hp via a real CDP tap on ⚑, torch walk at real time, survive via the sanctioned time-scale hook) → Epic learned + card |
-| Fragments | walking tide_coil's three sites counts 1, 2, 3 — auto-learned exactly at 3/3 |
+| Shrines | all three challenge kinds completed end-to-end (guardian at 2.5× hp via a real CDP tap on ⚑, torch walk at real time, survive via the sanctioned time-scale hook) → Epic learned **and the ACQUIRED card gated, not just observed** |
+| Fragments | walking tide_coil's three sites counts 1, 2, 3 — auto-learned exactly at 3/3, card gated |
 | Boss Vael | dormant → P1 (damage exact) → P2 shield (plain damage ×0.15 measured; **Overload strips a layer**) → P3 (the one shield refresh) → kill → scripted Legendary + card |
-| Budgets on world walks | peak 47 draws, 77 k tris, heap 4.4 MB, **0 B/frame over 6 271 frames**, tick 60.0 |
+| Budgets **throughout** | sampled across the walks, all 12 kind probes, the shrine challenges and the whole boss fight: peak **64 draws (the boss arena is the peak scene)**, 77 k tris, heap 4.4 MB, **0 B/frame over 10 187 frames**, tick 60.0, ≤ 5 enemies beyond the walks |
 
 The gate found one real product bug: the smallest ranged kind (spore, a blob at
 scale 0.7) fired from a muzzle 0.41 u up while the shared projectile pool killed

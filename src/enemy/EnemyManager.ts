@@ -329,7 +329,7 @@ export class EnemyManager implements System {
         this.dealArea(enemy, STRIKE_RADIUS, STRIKE_KNOCK);
       }
 
-      // Touching a slime hurts — 0.5 s per-enemy cooldown, and never during an
+      // Touching an enemy hurts — 0.5 s per-enemy cooldown, and never during an
       // attack, so the telegraph's "no damage before the ring completes" holds.
       if (
         dist < CONTACT_CHECK_DIST &&
